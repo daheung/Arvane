@@ -1,0 +1,2 @@
+timestamp,method,elapsed_ms,current_mem_mb,peak_mem_mb,recompiled
+1754921097.987957,_depth_est_forward,48263.283,5164.418,8193.234,1
