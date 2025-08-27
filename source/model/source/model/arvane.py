@@ -608,8 +608,10 @@ class ArvaneModel(torch.nn.Module):
         gt_maxbound
     ):
         if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
             t0 = time.time()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                
 
         self.container.gt_origin = gt_origin.to(self.config.device)
         self.container.gt_maxbound = gt_maxbound.to(self.config.device)
@@ -661,10 +663,11 @@ class ArvaneModel(torch.nn.Module):
                 )
 
         if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
             t1 = time.time()
             self.init_time += t1 - t0
             self.n_inits += 1
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
     
     @torch.compile(dynamic=False, fullgraph=True, mode="default")
     def depth_forward(
@@ -854,8 +857,9 @@ class ArvaneModel(torch.nn.Module):
         assert batch_size == 1 and n_imgs == 1 or resize
 
         if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
             t0 = time.time()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
         # fuse each view into the scene volume
         uv, z, valid = project(
@@ -943,10 +947,11 @@ class ArvaneModel(torch.nn.Module):
                 )
 
         if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
             t1 = time.time()
             self.per_view_time += t1 - t0
             self.n_views += 1
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
     def preview_update(
         self,
@@ -969,8 +974,9 @@ class ArvaneModel(torch.nn.Module):
         )
 
         if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
             t0 = time.time()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
         global_feats = self.container.M
         global_feats = self.fusion.bn(global_feats[None]).squeeze(0)
@@ -1283,10 +1289,11 @@ class ArvaneModel(torch.nn.Module):
         fine_surface += 0.5
 
         if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
             t1 = time.time()
             self.final_step_time += t1 - t0
             self.n_final_steps += 1
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
 
         origin = (
             gt_origin.cpu().numpy()[0]

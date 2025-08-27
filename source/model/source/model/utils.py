@@ -292,6 +292,7 @@ def load_config(config_fname):
     else:
         config.accelerator = "cpu"
         config.n_devices = 1
+        config.device = 'cpu'
 
     return config
 
