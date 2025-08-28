@@ -1,0 +1,67 @@
+run_name: "Arvane"
+
+improved_tsdf_sampling: True
+point_backprojection: True
+
+depth_guidance:
+  enabled: True
+  # pred_depth_dir: ../datasets/scannet_v2/dataset
+  depth_scale_augmentation: True
+  bp_weighting: "none"
+  tsdf_fusion_channel: True
+  density_fusion_channel: False
+
+output_sample_rate: 2
+reduce_lr_on_plateau: False
+no_image_features: False
+
+# initial_lr: 0.001
+# steps: 60_000
+# finetune_steps: 10_000
+n_views_train: 20
+n_views_val: 20
+# workers_train: 12
+# workers_val: 12
+# workers_predict: 12
+# batch_size_per_device: 1
+voxel_size: 0.04
+# crop_size_nvox_train: [96, 96, 56]
+# crop_size_nvox_val: [96, 96, 96]
+
+# dataset_dir: "../datasets/scannet_v2/dataset"
+# tsdf_dir: "../datasets/scannet_v2/gt_tsdf"
+
+# if no keyframes file is provided then inference will use every frame
+# test_keyframes_file: "../datasets/scannet_v2/keyframes.json"
+
+do_prediction_timing: True
+do_prediction_rendering: False
+# ckpt: '../checkpoints/arvane.pt'
+checkpoints: '../checkpoints/arvane.pt'
+
+images_rate: 1
+images_stride: 1
+
+# --------depth config--------
+# depth_estimation:
+  # model: depth_pro
+  # patch_encoder_preset: "dinov2l16_384"
+  # image_encoder_preset: "dinov2l16_384"
+  # checkpoint_uri: "../checkpoints/arvane.pt"
+  # decoder_features: 256
+  # use_fov_head: True
+  # fov_encoder_preset: "dinov2l16_384"
+
+# output: "../outputs"
+
+# --------render interface--------
+# render_hardware_interface: 'opengl'
+# platform: 'windows'
+# enable_debug: True
+# use_fov_head: True
+
+# --------server--------
+ip: 0.0.0.0
+port: 4723
+
+# init_queue_capacity: 5
