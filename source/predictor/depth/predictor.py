@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from torch import nn
 from torchvision.transforms import (
@@ -23,8 +24,8 @@ from .network.vit_factory import VIT_CONFIG_DICT, ViTPreset, create_vit
 
 
 @dataclass
-class DepthPredictorConfig:
-    """Configuration for DepthPredictor."""
+class DepthProConfig:
+    """Configuration for DepthPro."""
 
     patch_encoder_preset: ViTPreset
     image_encoder_preset: ViTPreset
@@ -35,7 +36,7 @@ class DepthPredictorConfig:
     use_fov_head: bool = True
 
 
-DEFAULT_MONODEPTH_CONFIG_DICT = DepthPredictorConfig(
+DEFAULT_MONODEPTH_CONFIG_DICT = DepthProConfig(
     patch_encoder_preset="dinov2l16_384",
     image_encoder_preset="dinov2l16_384",
     checkpoint_uri="./checkpoints/depth_pro.pt",
@@ -69,7 +70,7 @@ def create_backbone_model(
 
 
 def create_model_and_transforms(
-    config: DepthPredictorConfig = DEFAULT_MONODEPTH_CONFIG_DICT,
+    config: DepthProConfig = DEFAULT_MONODEPTH_CONFIG_DICT,
     device: torch.device = torch.device("cpu"),
     precision: torch.dtype = torch.float32,
 ) -> Tuple[DepthPro, Compose]:
@@ -150,8 +151,8 @@ def create_model_and_transforms(
     return model, transform
 
 
-class DepthPredictor(nn.Module):
-    """DepthPredictorConfig network."""
+class DepthPro(nn.Module):
+    """DepthProConfig network."""
 
     def __init__(
         self,
@@ -161,7 +162,7 @@ class DepthPredictor(nn.Module):
         use_fov_head: bool = True,
         fov_encoder: Optional[nn.Module] = None,
     ):
-        """Initialize DepthPredictor.
+        """Initialize DepthPro.
 
         Args:
         ----
@@ -296,3 +297,19 @@ class DepthPredictor(nn.Module):
             "focallength_px": f_px,
             "fov_deg": fov_deg
         }
+
+class DepthPredictor:
+    def __init__(self, config):
+        predictor, transformer = create_model_and_transforms()
+
+        self.config = config
+        self.predictor = predictor
+        self.transformer = transformer
+
+    def predict(self, rgb_imgs: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+        rgb_imgs = self.transformer(rgb_imgs).to(self.config.device)
+        output = self.predictor.infer(rgb_imgs)
+
+        depth = output["depth"].cpu().squeeze()
+        f_px = output["focalllength_px"].cpu().squeeze()
+        return depth, f_px
