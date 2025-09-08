@@ -1,0 +1,2 @@
+class ArvaneAnalyzer:
+    pass
