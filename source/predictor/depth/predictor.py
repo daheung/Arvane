@@ -6,8 +6,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Optional, Tuple, Union
 
-import numpy as np
+import os
+import sys
 import torch
+import logging
+import numpy as np
+
 from torch import nn
 from torchvision.transforms import (
     Compose,
@@ -17,10 +21,20 @@ from torchvision.transforms import (
     ToTensor,
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logging.info("Loading DepthPredictor...")
 from .network.decoder import MultiresConvDecoder
 from .network.encoder import DepthProEncoder
 from .network.fov import FOVNetwork
 from .network.vit_factory import VIT_CONFIG_DICT, ViTPreset, create_vit
+
 
 
 @dataclass
@@ -34,17 +48,6 @@ class DepthProConfig:
     checkpoint_uri: Optional[str] = None
     fov_encoder_preset: Optional[ViTPreset] = None
     use_fov_head: bool = True
-
-
-DEFAULT_MONODEPTH_CONFIG_DICT = DepthProConfig(
-    patch_encoder_preset="dinov2l16_384",
-    image_encoder_preset="dinov2l16_384",
-    checkpoint_uri="./checkpoints/depth_pro.pt",
-    decoder_features=256,
-    use_fov_head=True,
-    fov_encoder_preset="dinov2l16_384",
-)
-
 
 def create_backbone_model(
     preset: ViTPreset
@@ -70,7 +73,7 @@ def create_backbone_model(
 
 
 def create_model_and_transforms(
-    config: DepthProConfig = DEFAULT_MONODEPTH_CONFIG_DICT,
+    config: DepthProConfig,
     device: torch.device = torch.device("cpu"),
     precision: torch.dtype = torch.float32,
 ) -> Tuple[DepthPro, Compose]:
@@ -132,7 +135,10 @@ def create_model_and_transforms(
     )
 
     if config.checkpoint_uri is not None:
-        state_dict = torch.load(config.checkpoint_uri, map_location="cpu")
+        checkpoint_uri = os.path.join(os.getcwd(), "Arvane/source", config.checkpoint_uri)
+        logging.info(f"Loading DepthPro weights from {checkpoint_uri}")
+
+        state_dict = torch.load(checkpoint_uri, map_location="cpu")
         missing_keys, unexpected_keys = model.load_state_dict(
             state_dict=state_dict, strict=True
         )
@@ -300,16 +306,19 @@ class DepthPro(nn.Module):
 
 class DepthPredictor:
     def __init__(self, config):
-        predictor, transformer = create_model_and_transforms()
+        predictor, transformer = create_model_and_transforms(config)
 
         self.config = config
         self.predictor = predictor
         self.transformer = transformer
 
-    def predict(self, rgb_imgs: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+    def init(self):
+        self.predictor = self.predictor.to(device=self.config.device)
+
+    def infer(self, rgb_imgs: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
         rgb_imgs = self.transformer(rgb_imgs).to(self.config.device)
         output = self.predictor.infer(rgb_imgs)
 
         depth = output["depth"].cpu().squeeze()
-        f_px = output["focalllength_px"].cpu().squeeze()
+        f_px = output["focallength_px"].cpu().squeeze()
         return depth, f_px

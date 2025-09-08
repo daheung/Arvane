@@ -10,8 +10,8 @@ import torch
 import torchvision
 import trimesh
 
-import utils
-import tsdf_fusion
+from . import utils
+from . import tsdf_fusion
 
 TARGET_RGB_IMG_SIZE = (480, 640)
 

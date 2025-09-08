@@ -1,14 +1,24 @@
-import itertools
 import os
+import sys
 import time
 import tqdm
 import torch
+import logging
 import numpy as np
 import pytorch_lightning as pl
 
-import data
-import utils
-import network
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logging.info("Loading ReconPredictor...")
+from . import data
+from . import utils
+from . import network
 
 class ReconPredictor(pl.LightningModule):
     def __init__(self, config):

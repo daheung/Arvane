@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import logging
 import types
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
@@ -19,9 +18,6 @@ from .vit import (
     resize_patch_embed,
     resize_vit,
 )
-
-LOGGER = logging.getLogger(__name__)
-
 
 ViTPreset = Literal[
     "dinov2l16_384",
@@ -120,5 +116,4 @@ def create_vit(
         if len(missing_keys) != 0:
             raise KeyError(f"Keys are missing when loading vit: {missing_keys}")
 
-    LOGGER.info(model)
     return model.model

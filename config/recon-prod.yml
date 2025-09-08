@@ -1,0 +1,21 @@
+improved_tsdf_sampling: True
+point_backprojection: True
+
+depth_guidance:
+  enabled: True
+  depth_scale_augmentation: True
+  bp_weighting: "none"
+  tsdf_fusion_channel: True
+  density_fusion_channel: False
+
+output_sample_rate: 2
+reduce_lr_on_plateau: False
+no_image_features: False
+
+n_views_train: 20
+n_views_val: 20
+voxel_size: 0.04
+
+do_prediction_timing: True
+do_prediction_rendering: False
+checkpoints: 'predictor/checkpoints/arvane.pt'
