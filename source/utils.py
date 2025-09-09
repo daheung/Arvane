@@ -15,7 +15,7 @@ logging.basicConfig(
 
 def load_config():        
     run_mode = os.getenv("MODE", "development")
-    config_path = os.path.join(os.getcwd(), "Arvane/config")
+    config_path = os.path.join(os.getcwd(), "config")
 
     if run_mode == "development":
         depth_config = os.path.join(config_path, "depth-dev.yml")

@@ -135,7 +135,7 @@ def create_model_and_transforms(
     )
 
     if config.checkpoint_uri is not None:
-        checkpoint_uri = os.path.join(os.getcwd(), "Arvane/source", config.checkpoint_uri)
+        checkpoint_uri = os.path.join(os.getcwd(), "source", config.checkpoint_uri)
         logging.info(f"Loading DepthPro weights from {checkpoint_uri}")
 
         state_dict = torch.load(checkpoint_uri, map_location="cpu")

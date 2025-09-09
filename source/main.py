@@ -31,6 +31,10 @@ async def launch_main_server_start_up(app: FastAPI) -> FastAPI:
     # set app state dependencies
     app.state.depth_predictor = depth_predictor
     app.state.recon_predictor = ReconPredictor(recon_config)
+
+    # load container
+    # from .
+
     return app
 
 
