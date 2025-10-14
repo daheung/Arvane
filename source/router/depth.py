@@ -10,8 +10,11 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import Response, JSONResponse
 from fastapi.exceptions import HTTPException
 
-from .utils import NDArrayBuf, bench_mark
-from .verify import (
+from source.engine.arvane_engine import ArvaneEngine
+from source.predictor.depth.predictor import DepthPredictor
+
+from source.router.utils.utils import NDArrayBuf, bench_mark
+from source.router.utils.verify import (
     check_dtype, 
     InvalidRequestQueryType, 
     InvalidRequestQueryException,
@@ -19,7 +22,6 @@ from .verify import (
     InvalidRequestBodyException,
 )
 
-from ..predictor.depth.predictor import DepthPredictor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,8 +33,12 @@ logging.basicConfig(
 
 infer_router = APIRouter(prefix="/api/infer/depth")
 
+def get_arvane_engine(request: Request):
+    return cast(ArvaneEngine, request.app.state.engine)
+
 def get_depth_inference(request: Request) -> DepthPredictor:
-    return cast(DepthPredictor, request.app.state.depth_predictor)
+    return cast(DepthPredictor, request.app.state.engine.depth_predictor)
+
 
 @infer_router.options("")
 async def preflight() -> Response:

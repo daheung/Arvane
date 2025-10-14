@@ -33,6 +33,8 @@ def load_config_impl(config_fname):
         data = yaml.safe_load(f) or {}
         config = box.Box(data)
 
+    config.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     n_gpus = torch.cuda.device_count()
     if n_gpus > 0:
         config.accelerator = "gpu"
@@ -41,5 +43,4 @@ def load_config_impl(config_fname):
         config.accelerator = "cpu"
         config.n_devices = 1
         
-    config.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     return config

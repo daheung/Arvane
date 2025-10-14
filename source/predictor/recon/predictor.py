@@ -5,7 +5,8 @@ import tqdm
 import torch
 import logging
 import numpy as np
-import pytorch_lightning as pl
+
+from typing import List, Any
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,16 +17,43 @@ logging.basicConfig(
 )
 
 logging.info("Loading ReconPredictor...")
-from . import data
-from . import utils
-from . import network
 
-class ReconPredictor(pl.LightningModule):
+from source.predictor.recon import data
+from source.predictor.recon import utils
+from source.predictor.recon import network
+from source.predictor.utils import pad_last
+
+from dataclasses import dataclass, field
+
+@dataclass(slots=True)
+class ReconInferArray:
+    images : List = field(default_factory=list)
+    depths : List = field(default_factory=list)
+    k_color: List = field(default_factory=list)
+    k_depth: List = field(default_factory=list)
+    poses  : List = field(default_factory=list)
+
+    M                     : torch.Tensor = None
+    running_count         : torch.Tensor = None
+    running_density       : torch.Tensor = None
+    running_tsdf          : torch.Tensor = None
+    global_step           : torch.Tensor = None
+    global_coords         : torch.Tensor = None
+    running_density_weight: torch.Tensor = None
+    running_tsdf_weight   : torch.Tensor = None
+        
+    init_time      : int = 0
+    per_view_time  : int = 0
+    n_views        : int = 0
+    n_inits        : int = 0
+    final_step_time: int = 0
+    n_final_steps  : int = 0
+
+class ReconPro(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.save_hyperparameters()
         self.config = config
-
+        
         img_feature_dim = 47
         self.cnn2d = network.Cnn2d(out_dim=img_feature_dim)
         self.fusion = network.FeatureFusion(in_c=img_feature_dim)
@@ -73,26 +101,7 @@ class ReconPredictor(pl.LightningModule):
             network.ResBlock1d(32),
             torch.nn.Conv1d(32, 1, 1),
         )
-
-        if self.config.do_prediction_timing:
-            self.init_time = 0
-            self.per_view_time = 0
-            self.final_step_time = 0
-            self.n_final_steps = 0
-            self.n_views = 0
-            self.n_inits = 0
-
-    def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=0.001)
-        sched = torch.optim.lr_scheduler.LambdaLR(
-            opt,
-            lambda epoch: 1
-            if self.global_step < (self.config.steps - self.config.finetune_steps)
-            else 0.1,
-            verbose=True,
-        )
-        return [opt], [sched]
-
+    
     def get_img_voxel_feats_by_depth_guided_bp(
         self,
         rgb_imgs,
@@ -204,13 +213,13 @@ class ReconPredictor(pl.LightningModule):
             K = K_color.clone()
             K[:, :, 0] *= featwidth / imwidth
             K[:, :, 1] *= featheight / imheight
-            with torch.autocast(enabled=False, device_type=self.device.type):
+            with torch.autocast(enabled=False, device_type=self.config.device):
                 xyz_cam = (torch.inverse(poses.float()) @ xyz)[:, :, :3]
                 uv = K @ xyz_cam
             uv = uv[:, :, :2] / uv[:, :, 2:]
 
             featsize = torch.tensor(
-                [featwidth, featheight], device=self.device, dtype=uv.dtype
+                [featwidth, featheight], device=self.config.device, dtype=uv.dtype
             )[None, None, :, None]
             uv[:, :, 0].clamp_(0, imwidth)
             uv[:, :, 1].clamp_(0, imheight)
@@ -232,7 +241,7 @@ class ReconPredictor(pl.LightningModule):
         grid_origin: B3
         """
         crop_size_m = (
-            torch.tensor(voxel_feats.shape[2:], device=self.device)
+            torch.tensor(voxel_feats.shape[2:], device=self.config.device)
             * self.config.voxel_size
         )
         grid = (
@@ -259,285 +268,20 @@ class ReconPredictor(pl.LightningModule):
         return point_feats, point_valid
 
     def augment_depth_inplace(self, batch):
-        n_views = batch["pred_depth_imgs"].shape[1]
+        n_views = batch["depths"].shape[1]
         n_augment = n_views // 2
 
-        for i in range(len(batch["pred_depth_imgs"])):
+        for i in range(len(batch["depths"])):
             j = np.random.choice(
-                batch["pred_depth_imgs"].shape[1], size=n_augment, replace=False
+                batch["depths"].shape[1], size=n_augment, replace=False
             )
-            scale = torch.rand(len(j), device=self.device) * 0.2 + 0.9
-            batch["pred_depth_imgs"][i, j] *= scale[:, None, None]
+            scale = torch.rand(len(j), device=self.config.device) * 0.2 + 0.9
+            batch["depths"][i, j] *= scale[:, None, None]
 
-    def compute_loss(
-        self,
-        tsdf_logits,
-        occ_logits,
-        gt_tsdf,
-        gt_occ,
-        coarse_point_valid,
-        fine_point_valid,
-    ):
-        occ_loss_mask = (~gt_occ.isnan()) & coarse_point_valid
-        tsdf_loss_mask = (gt_occ > 0.5) & (~gt_tsdf.isnan()) & fine_point_valid
-
-        occ_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-            occ_logits[occ_loss_mask], gt_occ[occ_loss_mask]
-        )
-
-        loss = occ_loss
-        if tsdf_loss_mask.sum() > 0:
-            tsdf_loss = torch.nn.functional.l1_loss(
-                utils.log_transform(torch.tanh(tsdf_logits[tsdf_loss_mask])),
-                utils.log_transform(gt_tsdf[tsdf_loss_mask]),
-            )
-            loss += tsdf_loss
-        else:
-            tsdf_loss = torch.tensor(torch.nan)
-
-        return loss, tsdf_loss, occ_loss
-
-    def step(self, batch):
-        if self.depth_guidance.enabled:
-            if self.training and self.depth_guidance.depth_scale_augmentation:
-                self.augment_depth_inplace(batch)
-
-            voxel_feats, voxel_valid = self.get_img_voxel_feats_by_depth_guided_bp(
-                batch["rgb_imgs"],
-                batch["pred_depth_imgs"],
-                batch["poses"],
-                batch["K_color"][:, None],
-                batch["K_pred_depth"][:, None],
-                batch["input_coords"],
-            )
-            voxel_feats = self.fusion(voxel_feats, voxel_valid)
-            voxel_valid = voxel_valid.sum(dim=1) > 1
-            if self.config.no_image_features:
-                voxel_feats = voxel_feats * 0
-
-            if self.depth_guidance.density_fusion_channel:
-                density, weight = utils.density_fusion(
-                    batch["pred_depth_imgs"],
-                    batch["poses"],
-                    batch["K_pred_depth"][:, None],
-                    batch["input_coords"],
-                    self.config.voxel_size,
-                )
-                voxel_feats = torch.cat((voxel_feats, density[:, None]), dim=1)
-            elif self.depth_guidance.tsdf_fusion_channel:
-                tsdf, weight = utils.tsdf_fusion(
-                    batch["pred_depth_imgs"],
-                    batch["poses"],
-                    batch["K_pred_depth"][:, None],
-                    batch["input_coords"],
-                    self.config.voxel_size
-                )
-                tsdf.masked_fill_(weight == 0, 1)
-                voxel_feats = torch.cat((voxel_feats, tsdf[:, None]), dim=1)
-        else:
-            voxel_feats, voxel_valid = self.get_img_voxel_feats_by_img_bp(
-                batch["rgb_imgs"],
-                batch["poses"],
-                batch["K_color"][:, None],
-                batch["input_coords"],
-            )
-            voxel_feats = self.fusion(voxel_feats, voxel_valid)
-            voxel_valid = voxel_valid.sum(dim=1) > 1
-
-        voxel_feats = self.cnn3d(voxel_feats, voxel_valid)
-
-        if self.config.improved_tsdf_sampling:
-            """
-            interpolate the features to the points where we have GT tsdf
-            """
-
-            t = batch["crop_center"]
-            R = batch["crop_rotation"]
-            coords = batch["output_coords"]
-
-            with torch.autocast(enabled=False, device_type=self.device.type):
-                coords_local = (coords - t[:, None]) @ R
-            coords_local += batch["crop_size_m"][:, None] / 2
-            origin = torch.zeros_like(batch["gt_origin"])
-
-            (
-                coarse_point_feats,
-                coarse_point_valid,
-            ) = self.sample_point_features_by_linear_interp(
-                coords_local, voxel_feats, voxel_valid, origin
-            )
-        else:
-            """
-            keep the voxel-center features that we have:
-            GT tsdf has already been interpolated to these points
-            """
-
-            coarse_point_feats = voxel_feats.view(*voxel_feats.shape[:2], -1)
-            coarse_point_valid = voxel_valid.view(voxel_valid.shape[0], -1)
-
-        if self.config.point_backprojection:
-            coords = batch["output_coords"]
-
-            if self.depth_guidance.enabled:
-                (
-                    fine_point_feats,
-                    fine_point_valid,
-                ) = self.get_img_voxel_feats_by_depth_guided_bp(
-                    batch["rgb_imgs"],
-                    batch["pred_depth_imgs"],
-                    batch["poses"],
-                    batch["K_color"][:, None],
-                    batch["K_pred_depth"][:, None],
-                    coords,
-                    use_highres_cnn=True,
-                )
-            else:
-                (
-                    fine_point_feats,
-                    fine_point_valid,
-                ) = self.get_img_voxel_feats_by_img_bp(
-                    batch["rgb_imgs"],
-                    batch["poses"],
-                    batch["K_color"][:, None],
-                    coords,
-                    use_highres_cnn=True,
-                )
-
-            fine_point_feats = self.point_fusion(
-                fine_point_feats[..., None, None], fine_point_valid[..., None, None]
-            )[..., 0, 0]
-            fine_point_valid = coarse_point_valid & (fine_point_valid.any(dim=1))
-            fine_point_feats = self.point_feat_mlp(fine_point_feats)
-
-            if self.config.no_image_features:
-                fine_point_feats = fine_point_feats * 0
-
-            if self.depth_guidance.enabled:
-                if self.depth_guidance.density_fusion_channel:
-                    density, weight = utils.density_fusion(
-                        batch["pred_depth_imgs"],
-                        batch["poses"],
-                        batch["K_pred_depth"][:, None],
-                        coords,
-                        self.config.voxel_size
-                    )
-                    fine_point_feats = torch.cat(
-                        (fine_point_feats, coarse_point_feats, density[:, None]), dim=1
-                    )
-                elif self.depth_guidance.tsdf_fusion_channel:
-                    tsdf, weight = utils.tsdf_fusion(
-                        batch["pred_depth_imgs"],
-                        batch["poses"],
-                        batch["K_pred_depth"][:, None],
-                        coords,
-                        self.config.voxel_size
-                    )
-                    tsdf.masked_fill_(weight == 0, 1)
-
-                    fine_point_feats = torch.cat(
-                        (fine_point_feats, coarse_point_feats, tsdf[:, None]), dim=1
-                    )
-                else:
-                    fine_point_feats = torch.cat(
-                        (fine_point_feats, coarse_point_feats), dim=1
-                    )
-
-            else:
-                fine_point_feats = torch.cat(
-                    (fine_point_feats, coarse_point_feats), dim=1
-                )
-
-        else:
-            fine_point_feats = coarse_point_feats
-            fine_point_valid = coarse_point_valid
-
-        tsdf_logits = self.surface_predictor(fine_point_feats).squeeze(1)
-        occ_logits = self.occ_predictor(coarse_point_feats).squeeze(1)
-
-        loss, tsdf_loss, occ_loss = self.compute_loss(
-            tsdf_logits,
-            occ_logits,
-            batch["gt_tsdf"],
-            batch["gt_occ"],
-            coarse_point_valid,
-            fine_point_valid,
-        )
-
-        outputs = {
-            "loss": loss,
-            "tsdf_loss": tsdf_loss,
-            "occ_loss": occ_loss,
-            "tsdf_logits": tsdf_logits,
-            "occ_logits": occ_logits,
-        }
-        return outputs
-
-    def training_step(self, batch, batch_idx):
-        outputs = self.step(batch)
-
-        logs = {}
-        for k in ["loss", "tsdf_loss", "occ_loss"]:
-            logs[f"loss_train/{k}"] = outputs[k].item()
-
-        logs["lr"] = self.optimizers().param_groups[0]["lr"]
-
-        self.log_dict(logs, rank_zero_only=True)
-        return outputs["loss"]
-
-    def validation_step(self, batch, batch_idx):
-        outputs = self.step(batch)
-
-        batch_size = batch["input_coords"].shape[0]
-        assert batch_size == 1, "validation step assumes val batch size == 1"
-
-        logs = {}
-        for k in ["loss", "tsdf_loss", "occ_loss"]:
-            logs[f"loss_val/{k}"] = outputs[k].item()
-
-        self.log_dict(logs, batch_size=batch_size, sync_dist=True)
-
-    def on_validation_epoch_end(self):
-        if self.global_rank != 0:
-            return
-
-        if self.current_epoch % 10 != 0:
-            return
-
-        # every 10 epochs run inference on the first test scan
-
-        loader = self.predict_dataloader(first_scan_only=True)
-        for i, batch in enumerate(tqdm.tqdm(loader, desc="prediction", leave=False)):
-            for k in batch:
-                if k in self.transfer_keys:
-                    batch[k] = batch[k].to(self.device)
-            self.predict_step(batch, i)
-        self.predict_cleanup()
-        torch.cuda.empty_cache()
-
-    def predict_cleanup(self):
-        del self.global_coords
-        del self.M
-        del self.running_count
-
-        del self.keyframe_rgb
-        del self.keyframe_pose
-
-        if self.depth_guidance.enabled:
-            del self.keyframe_depth
-            if self.depth_guidance.tsdf_fusion_channel:
-                del self.running_tsdf
-                del self.running_tsdf_weight
-
-            if self.depth_guidance.density_fusion_channel:
-                del self.running_density
-                del self.running_density_weight
-
-    def predict_init(self, batch):
+    def predict_init(self, batch, infer_object: ReconInferArray) -> ReconInferArray:
         # setup before starting inference on a new scan
-
-        if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
-            t0 = time.time()
+        torch.cuda.synchronize()
+        t0 = time.time()
 
         vox4 = self.config.voxel_size * 4
         minbound = batch["gt_origin"][0]
@@ -554,80 +298,76 @@ class ReconPredictor(pl.LightningModule):
             minbound[2], maxbound[2], self.config.voxel_size, dtype=torch.float32
         )
         xx, yy, zz = torch.meshgrid(x, y, z, indexing="ij")
-        self.global_coords = torch.stack((xx, yy, zz), dim=-1).to(self.device)
+        infer_object.global_coords = torch.stack((xx, yy, zz), dim=-1).to(self.config.device)
 
         nvox = xx.shape
-        self.running_count = torch.zeros(nvox, dtype=torch.float32, device=self.device)
-        self.M = torch.zeros(
+        infer_object.running_count = torch.zeros(nvox, dtype=torch.float32, device=self.config.device)
+        infer_object.M = torch.zeros(
             (self.fusion.out_c, *nvox),
             dtype=torch.float32,
-            device=self.device,
+            device=self.config.device,
         )
 
-        self.keyframe_rgb = []
-        self.keyframe_pose = []
-
         if self.depth_guidance.enabled:
-            self.keyframe_depth = []
+            infer_object.depths = []
 
             if self.depth_guidance.density_fusion_channel:
-                self.running_density = torch.zeros(
-                    nvox, dtype=torch.float32, device=self.device
+                infer_object.running_density = torch.zeros(
+                    nvox, dtype=torch.float32, device=self.config.device
                 )
-                self.running_density_weight = torch.zeros(
-                    nvox, dtype=torch.int32, device=self.device
+                infer_object.running_density_weight = torch.zeros(
+                    nvox, dtype=torch.int32, device=self.config.device
                 )
             elif self.depth_guidance.tsdf_fusion_channel:
-                self.running_tsdf = torch.zeros(
-                    nvox, dtype=torch.float32, device=self.device
+                infer_object.running_tsdf = torch.zeros(
+                    nvox, dtype=torch.float32, device=self.config.device
                 )
-                self.running_tsdf_weight = torch.zeros(
-                    nvox, dtype=torch.int32, device=self.device
+                infer_object.running_tsdf_weight = torch.zeros(
+                    nvox, dtype=torch.int32, device=self.config.device
                 )
 
-        if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
-            t1 = time.time()
-            self.init_time += t1 - t0
-            self.n_inits += 1
+        torch.cuda.synchronize()
+        t1 = time.time()
+        infer_object.init_time += t1 - t0
+        infer_object.n_inits += 1
 
-    def predict_per_view(self, batch):
+        return infer_object
+
+    def predict_per_view(self, batch, infer_object: ReconInferArray) -> ReconInferArray:
         # fuse each view into the scene volume
+        t0 = time.time()
+        torch.cuda.synchronize()
 
-        if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
-            t0 = time.time()
-
-        batch_size, n_imgs, _, imheight, imwidth = batch["rgb_imgs"].shape
+        batch_size, n_imgs, _, imheight, imwidth = batch["images"].shape
         imsize = imheight, imwidth
         assert batch_size == 1 and n_imgs == 1
 
         uv, z, valid = utils.project(
-            self.global_coords[None],
+            infer_object.global_coords[None],
             batch["poses"][None],
             batch["K_color"][None],
             imsize,
         )
         valid = valid[0, 0]
-        coords = self.global_coords[valid][None, None, None]
+        coords = infer_object.global_coords[valid][None, None, None]
 
         if self.depth_guidance.enabled:
             (
                 img_voxel_feats,
                 img_voxel_valid,
             ) = self.get_img_voxel_feats_by_depth_guided_bp(
-                batch["rgb_imgs"],
-                batch["pred_depth_imgs"],
+                batch["images"],
+                batch["depths"],
                 batch["poses"][None],
                 batch["K_color"][None],
-                batch["K_pred_depth"][None],
+                batch["K_depth"][None],
                 coords,
             )
             if self.depth_guidance.density_fusion_channel:
                 density, density_weight = utils.density_fusion(
-                    batch["pred_depth_imgs"],
+                    batch["depths"],
                     batch["poses"][None],
-                    batch["K_pred_depth"][:, None],
+                    batch["K_depth"][:, None],
                     coords,
                     self.config.voxel_size
                 )
@@ -635,9 +375,9 @@ class ReconPredictor(pl.LightningModule):
                 density_weight = density_weight[0, 0, 0]
             elif self.depth_guidance.tsdf_fusion_channel:
                 tsdf, tsdf_weight = utils.tsdf_fusion(
-                    batch["pred_depth_imgs"],
+                    batch["depths"],
                     batch["poses"][None],
-                    batch["K_pred_depth"][:, None],
+                    batch["K_depth"][:, None],
                     coords,
                     self.config.voxel_size
                 )
@@ -646,7 +386,7 @@ class ReconPredictor(pl.LightningModule):
                 tsdf.masked_fill_(tsdf_weight == 0, 0)
         else:
             (img_voxel_feats, img_voxel_valid,) = self.get_img_voxel_feats_by_img_bp(
-                batch["rgb_imgs"],
+                batch["images"],
                 batch["poses"][None],
                 batch["K_color"][None],
                 coords,
@@ -658,48 +398,48 @@ class ReconPredictor(pl.LightningModule):
         """
         img_voxel_feats.masked_fill_(~img_voxel_valid[:, :, None], 0)
 
-        old_count = self.running_count[valid].clone()
-        self.running_count[valid] += img_voxel_valid[0, 0, 0, 0]
-        new_count = self.running_count[valid]
+        old_count = infer_object.running_count[valid].clone()
+        infer_object.running_count[valid] += img_voxel_valid[0, 0, 0, 0]
+        new_count = infer_object.running_count[valid]
 
         x = img_voxel_feats[0, 0, :, 0, 0]
-        old_m = self.M[:, valid]
+        old_m = infer_object.M[:, valid]
         new_m = x / new_count[None] + (old_count / new_count)[None] * old_m
-        self.M[:, valid] = new_m
-        self.M.masked_fill_(self.running_count[None] == 0, 0)
+        infer_object.M[:, valid] = new_m
+        infer_object.M.masked_fill_(infer_object.running_count[None] == 0, 0)
 
         if self.depth_guidance.enabled:
             if self.depth_guidance.density_fusion_channel:
-                old_count = self.running_density_weight[valid]
-                self.running_density_weight[valid] += density_weight
-                new_count = self.running_density_weight[valid]
+                old_count = infer_object.running_density_weight[valid]
+                infer_object.running_density_weight[valid] += density_weight
+                new_count = infer_object.running_density_weight[valid]
                 denom = new_count + (new_count == 0)
-                self.running_density[valid] = (
-                    density / denom + (old_count / denom) * self.running_density[valid]
+                infer_object.running_density[valid] = (
+                    density / denom + (old_count / denom) * infer_object.running_density[valid]
                 )
             elif self.depth_guidance.tsdf_fusion_channel:
-                old_count = self.running_tsdf_weight[valid]
-                self.running_tsdf_weight[valid] += tsdf_weight
-                new_count = self.running_tsdf_weight[valid]
+                old_count = infer_object.running_tsdf_weight[valid]
+                infer_object.running_tsdf_weight[valid] += tsdf_weight
+                new_count = infer_object.running_tsdf_weight[valid]
                 denom = new_count + (new_count == 0)
-                self.running_tsdf[valid] = (
-                    tsdf / denom + (old_count / denom) * self.running_tsdf[valid]
+                infer_object.running_tsdf[valid] = (
+                    tsdf / denom + (old_count / denom) * infer_object.running_tsdf[valid]
                 )
 
-        if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
-            t1 = time.time()
-            self.per_view_time += t1 - t0
-            self.n_views += 1
+        t1 = time.time()
+        torch.cuda.synchronize()
+        infer_object.per_view_time += t1 - t0
+        infer_object.n_views += 1
 
-    def predict_final(self, batch):
+        return infer_object
+
+    def predict_final(self, batch, infer_object: ReconInferArray, task_id: str, out_path: str=None):
         # final reconstruction: run point back-projection & 3d cnn
 
-        if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
-            t0 = time.time()
+        torch.cuda.synchronize()
+        t0 = time.time()
 
-        global_feats = self.M
+        global_feats = infer_object.M
         global_feats = self.fusion.bn(global_feats[None]).squeeze(0)
 
         if self.config.no_image_features:
@@ -708,16 +448,16 @@ class ReconPredictor(pl.LightningModule):
         if self.depth_guidance.enabled:
             if self.depth_guidance.density_fusion_channel:
                 global_feats = torch.cat(
-                    (global_feats, self.running_density[None]), dim=0
+                    (global_feats, infer_object.running_density[None]), dim=0
                 )
             elif self.depth_guidance.tsdf_fusion_channel:
-                self.running_tsdf.masked_fill_(self.running_tsdf_weight == 0, 1)
+                infer_object.running_tsdf.masked_fill_(infer_object.running_tsdf_weight == 0, 1)
 
-                extra = self.running_tsdf[None]
+                extra = infer_object.running_tsdf[None]
                 global_feats = torch.cat((global_feats, extra), dim=0)
 
-        global_feats = self.cnn3d(global_feats[None], self.running_count[None] > 0)
-        global_valid = self.running_count > 0
+        global_feats = self.cnn3d(global_feats[None], infer_object.running_count[None] > 0)
+        global_valid = infer_object.running_count > 0
 
         coarse_spatial_dims = np.array(global_feats.shape[2:])
         fine_spatial_dims = coarse_spatial_dims * self.config.output_sample_rate
@@ -739,7 +479,7 @@ class ReconPredictor(pl.LightningModule):
 
         x = torch.arange(self.config.output_sample_rate)
         xx, yy, zz = torch.meshgrid(x, x, x, indexing="ij")
-        fine_idx_offset = torch.stack((xx, yy, zz), dim=-1).view(-1, 3).to(self.device)
+        fine_idx_offset = torch.stack((xx, yy, zz), dim=-1).view(-1, 3).to(self.config.device)
         fine_offset = (
             fine_idx_offset * fine_voxel_size
             - coarse_voxel_size / 2
@@ -749,14 +489,14 @@ class ReconPredictor(pl.LightningModule):
         coarse_voxel_chunk_size = (2**20) // (self.config.output_sample_rate**3)
 
         if self.config.point_backprojection:
-            imheight, imwidth = self.keyframe_rgb[0].shape[1:]
+            imheight, imwidth = infer_object.images[0].shape[1:]
             featheight = imheight // 4
             featwidth = imwidth // 4
 
             keyframe_chunk_size = 32
             highres_img_feats = torch.full(
                 (
-                    len(self.keyframe_rgb),
+                    len(infer_object.images),
                     self.cnn2d_pb_out_dim,
                     featheight,
                     featwidth,
@@ -768,18 +508,18 @@ class ReconPredictor(pl.LightningModule):
 
             for keyframe_chunk_start in tqdm.trange(
                 0,
-                len(self.keyframe_rgb),
+                len(infer_object.images),
                 keyframe_chunk_size,
-                desc="highres img feats",
+                desc="Highres image features",
                 leave=False,
             ):
                 keyframe_chunk_end = min(
                     keyframe_chunk_start + keyframe_chunk_size,
-                    len(self.keyframe_rgb),
+                    len(infer_object.images),
                 )
 
                 rgb_imgs = torch.stack(
-                    self.keyframe_rgb[keyframe_chunk_start:keyframe_chunk_end],
+                    infer_object.images[keyframe_chunk_start:keyframe_chunk_end],
                     dim=0,
                 )
 
@@ -788,7 +528,7 @@ class ReconPredictor(pl.LightningModule):
                 ] = self.cnn2d_pb(rgb_imgs)
 
         for coarse_voxel_chunk_start in tqdm.trange(
-            0, n_coarse_vox_occ, coarse_voxel_chunk_size, leave=False, desc="chunks"
+            0, n_coarse_vox_occ, coarse_voxel_chunk_size, leave=False, desc="Chunks"
         ):
             coarse_voxel_chunk_end = min(
                 coarse_voxel_chunk_start + coarse_voxel_chunk_size, n_coarse_vox_occ
@@ -818,59 +558,59 @@ class ReconPredictor(pl.LightningModule):
             )
 
             if self.config.point_backprojection:
-                img_feature_dim = self.M.shape[0]
+                img_feature_dim = infer_object.M.shape[0]
                 fine_bp_feats = torch.zeros(
                     (self.cnn2d_pb_out_dim, len(chunk_fine_coords)),
-                    device=self.device,
-                    dtype=self.M.dtype,
+                    device=self.config.device,
+                    dtype=infer_object.M.dtype,
                 )
                 counts = torch.zeros(
-                    len(chunk_fine_coords), device=self.device, dtype=torch.float32
+                    len(chunk_fine_coords), device=self.config.device, dtype=torch.float32
                 )
 
                 if self.depth_guidance.enabled:
                     if self.depth_guidance.density_fusion_channel:
                         fine_density = torch.zeros(
-                            len(chunk_fine_coords), device=self.device
+                            len(chunk_fine_coords), device=self.config.device
                         )
                         fine_density_weights = torch.zeros(
                             len(chunk_fine_coords),
-                            device=self.device,
+                            device=self.config.device,
                             dtype=torch.float32,
                         )
                     elif self.depth_guidance.tsdf_fusion_channel:
                         fine_tsdf = torch.zeros(
-                            len(chunk_fine_coords), device=self.device
+                            len(chunk_fine_coords), device=self.config.device
                         )
                         fine_tsdf_weights = torch.zeros(
                             len(chunk_fine_coords),
-                            device=self.device,
+                            device=self.config.device,
                             dtype=torch.float32,
                         )
 
                 for keyframe_chunk_start in range(
-                    0, len(self.keyframe_rgb), keyframe_chunk_size
+                    0, len(infer_object.images), keyframe_chunk_size
                 ):
                     keyframe_chunk_end = min(
                         keyframe_chunk_start + keyframe_chunk_size,
-                        len(self.keyframe_rgb),
+                        len(infer_object.images),
                     )
 
                     chunk_highres_img_feats = highres_img_feats[
                         keyframe_chunk_start:keyframe_chunk_end
-                    ].to(self.device)
+                    ].to(self.config.device)
                     rgb_img_placeholder = torch.empty(
                         1, len(chunk_highres_img_feats), 3, imheight, imwidth
                     )
 
                     poses = torch.stack(
-                        self.keyframe_pose[keyframe_chunk_start:keyframe_chunk_end],
+                        infer_object.poses[keyframe_chunk_start:keyframe_chunk_end],
                         dim=0,
                     )
 
                     if self.depth_guidance.enabled:
                         pred_depth_imgs = torch.stack(
-                            self.keyframe_depth[
+                            infer_object.depths[
                                 keyframe_chunk_start:keyframe_chunk_end
                             ],
                             dim=0,
@@ -883,7 +623,7 @@ class ReconPredictor(pl.LightningModule):
                             pred_depth_imgs[None],
                             poses[None],
                             batch["K_color"][:, None],
-                            batch["K_pred_depth"][:, None],
+                            batch["K_depth"][:, None],
                             chunk_fine_coords[None],
                             use_highres_cnn=True,
                             img_feats=chunk_highres_img_feats,
@@ -914,7 +654,7 @@ class ReconPredictor(pl.LightningModule):
                             density, weight = utils.density_fusion(
                                 pred_depth_imgs[None],
                                 poses[None],
-                                batch["K_pred_depth"][:, None],
+                                batch["K_depth"][:, None],
                                 chunk_fine_coords[None],
                                 self.config.voxel_size
                             )
@@ -930,7 +670,7 @@ class ReconPredictor(pl.LightningModule):
                             tsdf, weight = utils.tsdf_fusion(
                                 pred_depth_imgs[None],
                                 poses[None],
-                                batch["K_pred_depth"][:, None],
+                                batch["K_depth"][:, None],
                                 chunk_fine_coords[None],
                                 self.config.voxel_size
                             )
@@ -997,15 +737,14 @@ class ReconPredictor(pl.LightningModule):
         fine_surface *= 0.5
         fine_surface += 0.5
 
-        if self.config.do_prediction_timing:
-            torch.cuda.synchronize()
-            t1 = time.time()
-            self.final_step_time += t1 - t0
-            self.n_final_steps += 1
+        torch.cuda.synchronize()
+        t1 = time.time()
+        infer_object.final_step_time += t1 - t0
+        infer_object.n_final_steps += 1
 
-        os.makedirs(self.logger.log_dir, exist_ok=True)
-        name = batch["scan_name"][0]
-        step = str(self.global_step).zfill(8)
+        out_path = os.getcwd() if out_path is None else out_path
+        log_path = os.path.join(out_path, "logs/recon")
+        name = f"{time.time():.4f}_" + task_id + "_recon"
 
         origin = (
             batch["gt_origin"].cpu().numpy()[0]
@@ -1023,7 +762,8 @@ class ReconPredictor(pl.LightningModule):
         except Exception as e:
             print(e)
         else:
-            _ = pred_mesh.export(os.path.join(self.logger.log_dir, f"{name}.ply"))
+            glb_bytes = pred_mesh.export(os.path.join(log_path, f"{name}.glb"), file_type="glb")
+            return glb_bytes
 
     def predict_step(self, batch, batch_idx):
         if batch["initial_frame"][0]:
@@ -1034,137 +774,117 @@ class ReconPredictor(pl.LightningModule):
         if self.config.point_backprojection:
             # store any frames that are marked as keyframes for later point back-projection
             if batch["keyframe"][0]:
-                self.keyframe_rgb.append(batch["rgb_imgs"][0, 0])
+                self.keyframe_rgb.append(batch["images"][0, 0])
                 self.keyframe_pose.append(batch["poses"][0])
                 if self.depth_guidance.enabled:
-                    self.keyframe_depth.append(batch["pred_depth_imgs"][0, 0])
+                    self.keyframe_depth.append(batch["depths"][0, 0])
 
         if batch["final_frame"][0]:
             self.predict_final(batch)
 
     # args, kwargs: unreferenced parameters
-    def on_predict_epoch_end(self, *args, **kwargs):
-        if self.config.do_prediction_timing:
-            per_init_time = self.init_time / self.n_inits
-            per_view_time = self.per_view_time / self.n_views
-            final_step_time = self.final_step_time / self.n_final_steps
+    def on_predict_epoch_end(self, infer_object: ReconInferArray, task_id: str, *args, **kwargs):
+        
+        per_init_time = infer_object.init_time / infer_object.n_inits
+        per_view_time = infer_object.per_view_time / infer_object.n_views
+        final_step_time = infer_object.final_step_time / infer_object.n_final_steps
 
-            print("========")
-            print("========")
-            print(f"per_init_time: {per_init_time:.4f}")
-            print(f"per_view_time: {per_view_time:.4f}")
-            print(f"final_step_time: {final_step_time:.4f}")
-            print("========")
-            print("========")
+        print(f"{task_id} - per_init_time: {per_init_time:.4f}")
+        print(f"{task_id} - per_view_time: {per_view_time:.4f}")
+        print(f"{task_id} - final_step_time: {final_step_time:.4f}")
 
-    def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        self.transfer_keys = [
-            "input_coords",
-            "output_coords",
-            "crop_center",
-            "crop_rotation",
-            "crop_size_m",
-            "gt_tsdf",
-            "gt_occ",
-            "K_color",
-            "K_pred_depth",
-            "rgb_imgs",
-            "pred_depth_imgs",
+
+class ReconPredictor:
+    def __init__(self, config):
+        self.config = config
+        
+        checkpoint_uri = os.path.join(os.getcwd(), config.checkpoints)
+        self.predictor = ReconPro(config)
+        self.predictor.load_state_dict(
+            torch.load(checkpoint_uri, map_location="cpu")
+        )
+        
+        self.predictor.eval()
+        
+    def init(self):
+        self.predictor.to(self.config.device)
+    
+    def infer(self, batch, task_id):
+        if (not self._check_batch(batch)):
+            raise ValueError("Input batch is missing required keys.")
+
+        # 잘못된 batch를 수정
+        batch = self._update_gt_if_invalid(batch)
+
+        infer_object = ReconInferArray()
+        infer_object = self.predictor.predict_init(batch, infer_object=infer_object)
+
+        batch_iterator = data.ReconIterator(batch)
+        batch_step: int = 1
+        batch_length = batch_iterator.length // batch_step
+        
+        for frame_idx, frame in tqdm.tqdm(
+            enumerate(batch_iterator), 
+            total=batch_length, 
+            desc="Extract image features"
+        ):
+            infer_object = self.predictor.predict_per_view(frame, infer_object=infer_object)
+
+            if self.config.point_backprojection:
+                # store any frames that are marked as keyframes for later point back-projection
+                infer_object.images.append(frame["images"][0, 0])
+                infer_object.poses.append(frame["poses"][0])
+                if self.predictor.depth_guidance.enabled:
+                    infer_object.depths.append(frame["depths"][0, 0])
+
+                infer_object.k_color.append(frame["K_color"])
+                infer_object.k_depth.append(frame["K_depth"])
+
+            if (frame_idx == (batch_length) - 1):
+                logging.info(f"Start inference final step. task id: {task_id}")
+                temp_path = os.path.join(os.getcwd(), "Test/source/predictor")
+                glb_bytes = self.predictor.predict_final(frame, infer_object=infer_object, task_id=task_id, out_path=temp_path)
+                self.predictor.on_predict_epoch_end(infer_object=infer_object, task_id=task_id)
+
+        return glb_bytes
+
+    def _check_batch(self, batch):
+        required_keys = [
+            "images",
+            "depths",
             "poses",
+            "K_color",
+            "K_depth",
             "gt_origin",
             "gt_maxbound",
         ]
-        self.no_transfer_keys = [
-            "scan_name",
-            "gt_tsdf_npzfile",
-            "keyframe",
-            "initial_frame",
-            "final_frame",
-        ]
 
-        transfer_batch = {}
-        no_transfer_batch = {}
-        for k in batch:
-            if k in self.transfer_keys:
-                transfer_batch[k] = batch[k]
-            elif k in self.no_transfer_keys:
-                no_transfer_batch[k] = batch[k]
-            else:
-                raise NotImplementedError
+        for k in required_keys:
+            if k not in batch:
+                return False
+        
+        for k in required_keys:
+            if not len(batch[k]):
+                return False
+            
+        return True
+    
+    def _update_gt_if_invalid(self, batch: dict) -> Any | None:
+        try:
+            gt_origin = batch['gt_origin']
+            if (gt_origin.shape[0] != 1):
+                batch['gt_origin'] = batch['gt_origin'][0, None]
+                logging.warning(f"unexpected gt_origin found. change gt_origin shape [{gt_origin.shape[0]}, {gt_origin.shape[1]}] to [1, 3].")
+            
+            gt_maxbound = batch['gt_maxbound']
+            if (gt_maxbound.shape[0] != 1):
+                batch['gt_maxbound'] = batch['gt_maxbound'][0, None]
+                logging.warning(
+                    f"unexpected gt_maxbound found. change gt_maxbound shape [{gt_maxbound.shape[0]}, {gt_maxbound.shape[1]}] to [1, 3]."
+                )
 
-        transfer_batch = super().transfer_batch_to_device(
-            transfer_batch, device, dataloader_idx
-        )
-        transfer_batch.update(no_transfer_batch)
-        return transfer_batch
-
-    def get_scans(self):
-        train_scans, val_scans, test_scans = data.get_scans(
-            self.config.dataset_dir,
-            self.config.tsdf_dir,
-            self.depth_guidance.pred_depth_dir,
-        )
-        return train_scans, val_scans, test_scans
-
-    def train_dataloader(self):
-        train_scans, _, _ = self.get_scans()
-        train_dataset = data.Dataset(
-            train_scans,
-            self.config.voxel_size,
-            self.config.crop_size_nvox_train,
-            self.config.n_views_train,
-            improved_tsdf_sampling=self.config.improved_tsdf_sampling,
-            random_translation=True,
-            random_rotation=True,
-            random_view_selection=True,
-            image_augmentation=True,
-            load_depth=self.depth_guidance.enabled,
-        )
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size_per_device,
-            num_workers=self.config.workers_train,
-            persistent_workers=self.config.workers_train > 0,
-            shuffle=True,
-            drop_last=True,
-        )
-        return train_loader
-
-    def val_dataloader(self):
-        _, val_scans, test_scans = self.get_scans()
-        val_dataset = data.Dataset(
-            val_scans,
-            self.config.voxel_size,
-            self.config.crop_size_nvox_val,
-            self.config.n_views_val,
-            improved_tsdf_sampling=self.config.improved_tsdf_sampling,
-            random_translation=True,
-            random_rotation=True,
-            load_depth=self.depth_guidance.enabled,
-        )
-
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=1,
-            num_workers=self.config.workers_val,
-        )
-        return val_loader
-
-    def predict_dataloader(self, first_scan_only=False):
-        _, _, test_scans = self.get_scans()
-
-        if first_scan_only:
-            test_scans = test_scans[:1]
-
-        predict_dataset = data.InferenceDataset(
-            test_scans,
-            load_depth=self.depth_guidance.enabled,
-            keyframes_file=self.config.test_keyframes_file,
-        )
-        predict_loader = torch.utils.data.DataLoader(
-            predict_dataset,
-            batch_size=1,
-            num_workers=self.config.workers_predict,
-            persistent_workers=True,
-        )
-        return predict_loader
+        except Exception as e:
+            logging.error(f"ERROR: {e}")
+            
+        else:
+            return batch

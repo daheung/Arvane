@@ -10,8 +10,12 @@ import torch
 import torchvision
 import trimesh
 
-from . import utils
-from . import tsdf_fusion
+from typing import Dict, Any, List, Tuple, Iterator
+from dataclasses import dataclass
+
+from source.predictor.utils import pad_last
+from source.predictor.recon import utils
+from source.predictor.recon import tsdf_fusion
 
 TARGET_RGB_IMG_SIZE = (480, 640)
 
@@ -284,6 +288,42 @@ def reflect_pose(pose, plane_pt=None, plane_normal=None):
     result[:, :, 3] = pts[:, :, 3]
     return result
 
+def transfer_batch_to_device(batch, device):
+    transfer_keys = [
+        "input_coords",
+        "output_coords",
+        "crop_center",
+        "crop_rotation",
+        "crop_size_m",
+        "gt_tsdf",
+        "gt_occ",
+        "K_color",
+        "K_depth",
+        "images",
+        "depths",
+        "poses",
+        "gt_origin",
+        "gt_maxbound",
+    ]
+    no_transfer_keys = [
+        "scan_name",
+        "gt_tsdf_npzfile",
+        "keyframe",
+        "initial_frame",
+        "final_frame",
+    ]
+
+    transfer_batch = {}
+    no_transfer_batch = {}
+    for k in batch:
+        if k in transfer_keys:
+            transfer_batch[k] = batch[k].to(device)
+        elif k in no_transfer_keys:
+            no_transfer_batch[k] = batch[k]
+        else:
+            raise NotImplementedError
+        
+    return transfer_batch
 
 class InferenceDataset(torch.utils.data.Dataset):
     def __init__(self, scans, load_depth=False, keyframes_file=None):
@@ -365,7 +405,7 @@ class InferenceDataset(torch.utils.data.Dataset):
         gt_maxbound = torch.from_numpy(npz["maxbound"])
 
         result = {
-            "rgb_imgs": rgb_img,
+            "images": rgb_img,
             "poses": pose,
             "K_color": K_color,
             "scan_name": scan_name,
@@ -378,8 +418,8 @@ class InferenceDataset(torch.utils.data.Dataset):
         if self.load_depth:
             pred_depth_img = load_depth_img(pred_depth_imgfile)[None]
 
-            result["pred_depth_imgs"] = pred_depth_img
-            result["K_pred_depth"] = K_pred_depth
+            result["depths"] = pred_depth_img
+            result["K_depth"] = K_pred_depth
 
         return result
 
@@ -568,7 +608,7 @@ class Dataset(torch.utils.data.Dataset):
         rgb_imgs = load_rgb_imgs(rgb_imgfiles[view_inds], TARGET_RGB_IMG_SIZE)
         if self.image_augmentation:
             augment_images_inplace(rgb_imgs)
-        result["rgb_imgs"] = rgb_imgs
+        result["images"] = rgb_imgs
         result["K_color"] = K_color
 
         if self.load_depth:
@@ -591,8 +631,8 @@ class Dataset(torch.utils.data.Dataset):
                 ]
             ).float()
 
-            result["K_pred_depth"] = K_pred_depth
-            result["pred_depth_imgs"] = pred_depth_imgs
+            result["K_depth"] = K_pred_depth
+            result["depths"] = pred_depth_imgs
 
         result["poses"] = poses[view_inds]
         result["gt_tsdf_npzfile"] = tsdf_npzfile
@@ -674,3 +714,27 @@ class Dataset(torch.utils.data.Dataset):
         result["input_coords"] = input_coords
 
         return result
+
+class ReconIterator:
+    def __init__(self, batch: Dict[str, Any]):
+        self.batch: Dict[str, Any] = batch
+        
+        self.keys   : List[str] = list(batch.keys())
+        self.values : List[Any] = list(batch.values())
+        self.lengths: List[int] = [len(value) for value in self.values]
+        self.length : int       = max(self.lengths) if self.lengths else 0
+        
+        padded_values: List[Any] = [pad_last(value, self.length) for value in self.values]
+        self.data: Dict[str, Any] = {key: value for key, value in zip(self.keys, padded_values)}
+
+    @torch.no_grad()
+    def __getitem__(self, index: int) -> Tuple[int, Dict[str, Any]]:
+        return { key: value[index:index + 1] for key, value in self.data.items() }
+    
+    @torch.no_grad()
+    def __iter__(self) -> Iterator[Dict[str, Any]]:
+        for idx in range(self.length):
+            yield self.__getitem__(idx)
+
+    def __len__(self):
+        return self.length
