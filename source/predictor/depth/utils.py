@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
+import torch
 import numpy as np
 import pillow_heif
 from PIL import ExifTags, Image, TiffTags
@@ -116,3 +117,9 @@ def load_rgb(
         f_px = None
 
     return img, icc_profile, f_px
+
+def to_device(
+    x: torch.Tensor, 
+    device: torch.device
+) -> torch.Tensor:
+    return x.to(device)

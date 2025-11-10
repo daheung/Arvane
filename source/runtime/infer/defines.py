@@ -5,7 +5,7 @@ from enum import IntFlag
 from typing import Any
 from numpy.typing import NDArray
 from dataclasses import dataclass
-from source.runtime.array import ChunkArrayConcurrent
+from source.runtime.container.array import ChunkArrayConcurrent
 
 @dataclass
 class ReconLogging:
@@ -25,6 +25,17 @@ class ReconLogging:
         self.n_final_steps = 0
 
 @dataclass
+class StoreStatus:
+    CREATED = 0x00
+    DEPTH = 0x01
+    RECON = 0x02
+    EXTRACT = 0x04
+    
+    DONE = 0x0A
+    ABORTED = 0x0FD
+    PENDING_KILL = 0xFF
+
+@dataclass
 class ReconStore:
     M                       : torch.Tensor = None
     running_count           : torch.Tensor = None
@@ -39,6 +50,7 @@ class InferenceStore:
     user_id: str
     task_id: str
     chunk_size: int
+    store_status: StoreStatus
 
     depth_container       : ChunkArrayConcurrent[NDArray[np.float32]]
     pose_container        : ChunkArrayConcurrent[NDArray[np.float32]]
@@ -57,13 +69,15 @@ class InferenceStore:
         self.user_id = user_id
         self.task_id = task_id
         self.chunk_size = chunk_size
+        self.store_status = StoreStatus.CREATED
 
         # initialize containers
-        self.depth_container   = ChunkArrayConcurrent(chunk_size=chunk_size)
-        self.pose_container    = ChunkArrayConcurrent(chunk_size=chunk_size)
-        self.image_container   = ChunkArrayConcurrent(chunk_size=chunk_size)
-        self.k_image_container = ChunkArrayConcurrent(chunk_size=chunk_size)
-        self.k_depth_container = ChunkArrayConcurrent(chunk_size=chunk_size)
+        self.depth_container        = ChunkArrayConcurrent(chunk_size=chunk_size)
+        self.pose_container         = ChunkArrayConcurrent(chunk_size=chunk_size)
+        self.image_container        = ChunkArrayConcurrent(chunk_size=chunk_size)
+        self.k_image_container      = ChunkArrayConcurrent(chunk_size=chunk_size)
+        self.k_depth_container      = ChunkArrayConcurrent(chunk_size=chunk_size)
+        self.focal_length_container = ChunkArrayConcurrent(chunk_size=chunk_size)
 
         self.recon_store = ReconStore()
         self.recon_logging = ReconLogging()
@@ -85,6 +99,7 @@ class EStoreObjectType(IntFlag):
     RECON_OBJECT  = 0x100
 
     RECON_INFER_OBJECT = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH
+    RECON_INFER_NO_DEPTH = RECON_INFER_OBJECT & (~DEPTH)
 
     def to_enum(value: str) -> 'EStoreObjectType':
         mapping = {

@@ -7,7 +7,7 @@ import uuid as uid
 from typing import Any, Dict
 
 from source.runtime.infer.defines import InferenceStore, EStoreOperatorType, EStoreObjectType
-from source.runtime.array import ChunkArrayConcurrent
+from source.runtime.container.array import ChunkArrayConcurrent
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,10 +32,15 @@ class InferenceChunkStoreConcurrent:
 
         self._chunk_size = chunk_size
         self._items: Dict[str, InferenceStore] = dict()
-        
+    
+    def __getitem__(self, task_id: str) -> InferenceStore:
+        if not self._check_task_id(task_id):
+            raise KeyError(f"Cannot find task_id: current task id: {task_id}")
 
+        return self._items[task_id]
+    
     def add_task(self, user_id: str) -> str:
-        task_id = tid.uuid1()
+        task_id: str = str(tid.uuid1())
         self._items[task_id] = InferenceStore(
             user_id=user_id,
             task_id=task_id,
@@ -64,19 +69,21 @@ class InferenceChunkStoreConcurrent:
         if (keys is None) or (len(keys) == 0):
             raise ValueError(f"Cannot update empty object: current task id: {task_id}")
         
-        object_len_per_keys = [len(object) for object in objects]
+        # depth의 경우에는 나중에 모델에서 처리, 해당 이유로 depth는 체크하지 않음
+        object_len_per_keys = [len(item) for (key, item) in objects.items() if key != "depth"]
         if any(length == 0 for length in object_len_per_keys) or \
            any(length != object_len_per_keys[0] for length in object_len_per_keys):
             raise ValueError(f"Cannot update object with different length: current task id: {task_id}, object keys: {keys}, object lengths: {object_len_per_keys}")
 
         store = self._items[task_id]
-        if tsk_type & EStoreObjectType.DEPTH   : store.depth_container  .add_objects(objects.get("depth"  , None), op_type)
-        if tsk_type & EStoreObjectType.POSE    : store.pose_container   .add_objects(objects.get("pose"   , None), op_type)
-        if tsk_type & EStoreObjectType.IMAGE   : store.image_container  .add_objects(objects.get("image"  , None), op_type)
-        if tsk_type & EStoreObjectType.K_IMAGE : store.k_image_container.add_objects(objects.get("k_image", None), op_type)
-        if tsk_type & EStoreObjectType.K_DEPTH : store.k_depth_container.add_objects(objects.get("k_depth", None), op_type)
+        if tsk_type & EStoreObjectType.DEPTH       : store.depth_container       .add_objects(objects.get("depth"  , None))
+        if tsk_type & EStoreObjectType.POSE        : store.pose_container        .add_objects(objects.get("pose"   , None))
+        if tsk_type & EStoreObjectType.IMAGE       : store.image_container       .add_objects(objects.get("image"  , None))
+        if tsk_type & EStoreObjectType.K_IMAGE     : store.k_image_container     .add_objects(objects.get("k_image", None))
+        if tsk_type & EStoreObjectType.K_DEPTH     : store.k_depth_container     .add_objects(objects.get("k_depth", None))
+        if tsk_type & EStoreObjectType.FOCAL_LENGTH: store.focal_length_container.add_objects(objects.get("f_px"   , None))
 
-        return len(objects)
+        return 1
 
     def load_object_by_task_id(self, task_id: str, tsk_type: EStoreObjectType) -> Dict[str, ChunkArrayConcurrent]:
         if not self._check_task_id(task_id):
@@ -85,9 +92,9 @@ class InferenceChunkStoreConcurrent:
         store = self._items[task_id]
         ret_container = dict()
 
+        if tsk_type & EStoreObjectType.IMAGE  : ret_container["image"  ] = store.image_container
         if tsk_type & EStoreObjectType.DEPTH  : ret_container["depth"  ] = store.depth_container
         if tsk_type & EStoreObjectType.POSE   : ret_container["pose"   ] = store.pose_container
-        if tsk_type & EStoreObjectType.IMAGE  : ret_container["image"  ] = store.image_container
         if tsk_type & EStoreObjectType.K_IMAGE: ret_container["k_image"] = store.k_image_container
         if tsk_type & EStoreObjectType.K_DEPTH: ret_container["k_depth"] = store.k_depth_container
 

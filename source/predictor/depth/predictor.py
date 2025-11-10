@@ -10,6 +10,7 @@ import os
 import sys
 import torch
 import logging
+import functools
 import numpy as np
 
 from torch import nn
@@ -34,7 +35,7 @@ from .network.decoder import MultiresConvDecoder
 from .network.encoder import DepthProEncoder
 from .network.fov import FOVNetwork
 from .network.vit_factory import VIT_CONFIG_DICT, ViTPreset, create_vit
-
+from .utils import to_device
 
 
 @dataclass
@@ -128,7 +129,7 @@ def create_model_and_transforms(
     transform = Compose(
         [
             ToTensor(),
-            Lambda(lambda x: x.to(device)),
+            Lambda(functools.partial(to_device, device=device)),
             Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
             ConvertImageDtype(precision),
         ]
