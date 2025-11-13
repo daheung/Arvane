@@ -45,8 +45,8 @@ def verify_world_update(payload: WorldUpdatePayload) -> None:
     if payload.color.buffer_b64 is None:
         raise ValueError("color.buffer_b64 must not be null")
     
-    if payload.k_color is not None and len(payload.k_color) != 16:
-        raise ValueError("k_color must be a list of 16 floats.")
+    if payload.k_color is not None and len(payload.k_color) != 9:
+        raise ValueError("k_color must be a list of 9 floats.")
 
     if payload.pose is not None and len(payload.pose) != 16:
         raise ValueError("pose must be a list of 16 floats.")

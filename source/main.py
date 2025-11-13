@@ -64,6 +64,7 @@ from .router.depth import infer_router as infer_depth_router
 from .router.depth import update_router as update_depth_router
 from .router.image import image_router as image_router
 from .router.world.world import world_router as world_router
+from .router.debug.debug import debug_router as debug_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -82,6 +83,7 @@ app.include_router(infer_depth_router)
 app.include_router(update_depth_router)
 app.include_router(image_router)
 app.include_router(world_router)
+app.include_router(debug_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -104,7 +106,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logging.error("422 ValidationError: %s %s", request.method, request.url.path)
     logging.error("errors=%s | body=%s", formatted, body_text)
 
-    # 클라이언트에도 어떤 필드가 문제인지 돌려주고 싶다면:
     return JSONResponse(
         status_code=422,
         content={

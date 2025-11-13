@@ -1,12 +1,14 @@
 import os
-import box
-import yaml
+import tqdm
 import torch
 import trimesh
 import numpy as np
-import scipy.spatial
 import skimage.measure
 import pytorch_lightning as pl
+
+from typing import Tuple
+from numpy.typing import NDArray
+from source.predictor.recon.tsdf_fusion import TSDFVolumeTorch
 
 @pl.utilities.rank_zero_only
 def zip_code(save_dir):
@@ -171,3 +173,82 @@ def tsdf_fusion(pred_depth_imgs, poses, K_pred_depth, input_coords, voxel_size):
     weight = torch.sum(valid, dim=1)
     tsdf /= weight
     return tsdf, weight
+
+def estimate_volume_bounds_from_recon_datas(
+    depths: NDArray,
+    poses: NDArray,
+    k_images: NDArray,
+    max_depth = 3.5,
+    voxel_size = 0.02,
+    margin = None,
+    device = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    margin = int(np.round(0.04 / voxel_size))
+    _, _, imheight, imwidth = depths.shape
+
+    K = k_images[:3, :3]
+    
+    u = np.arange(0, imwidth, 10)
+    v = np.arange(0, imheight, 10)
+    uu, vv = np.meshgrid(u, v, indexing="ij")
+    uv = np.c_[uu.flatten(), vv.flatten()]
+    pix_vecs = (np.linalg.inv(K) @ np.c_[uv, np.ones((len(uv), 1))].T).T
+
+    pts = []
+    for i in tqdm.trange(0, len(poses), 10, leave=False, desc='computing scene bounds'):
+        pose = poses[i]
+        if np.any(np.isinf(pose)):
+            continue
+        depth = depths[i, 0, ...] / 1000
+        depth[depth > max_depth] = 0
+        depth = depth[uv[:, 1], uv[:, 0]]
+        valid = depth > 0
+        xyz_cam = pix_vecs[valid] * depth[valid, None]
+        xyz = (pose @ np.c_[xyz_cam, np.ones((len(xyz_cam), 1))].T).T[:, :3]
+        pts.append(xyz)
+
+    pts = np.concatenate(pts, axis=0)
+
+    minbound = np.min(pts, axis=0) - 3 * margin * voxel_size
+    maxbound = np.max(pts, axis=0) + 3 * margin * voxel_size
+
+    voxel_dim = torch.from_numpy(np.ceil((maxbound - minbound) / voxel_size)).int()
+    origin = torch.from_numpy(minbound).float()
+
+    torch.cuda.empty_cache()
+    try:
+        tsdf_vol = TSDFVolumeTorch(
+            voxel_dim.to(device),
+            origin.to(device),
+            voxel_size,
+            margin=margin,
+            device=device,
+        )
+    except Exception as e:
+        print(e)
+        ...
+
+    for i in tqdm.trange(len(poses), leave=False, desc='TSDF fusion'):
+        pose = poses[i]
+        if np.any(np.isinf(pose)):
+            continue
+        depth = depths[i, 0, ...] / 1000
+        depth[depth > max_depth] = 0
+        tsdf_vol.integrate(
+            torch.from_numpy(depth),
+            torch.from_numpy(K).float(),
+            torch.from_numpy(pose).float(),
+            1,
+        )
+
+    tsdf, weight = tsdf_vol.get_volume()
+    tsdf[weight == 0] = torch.nan
+
+    unobserved_col_mask = (
+        (weight == 0).all(dim=-1, keepdim=True).repeat(1, 1, tsdf.shape[-1])
+    )
+    tsdf[unobserved_col_mask] = -1
+
+    maxbound = origin + voxel_size * torch.tensor(tsdf.shape)
+
+    return tsdf, origin, maxbound

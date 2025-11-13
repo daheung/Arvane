@@ -26,7 +26,7 @@ class FixedChunkObject(Generic[T]):
 class FixedChunkArray(Generic[T]):
     def __init__(self, chunk_size):
         self._items: List[FixedChunkObject[T]] = list()
-        self._items_lock = threading.Lock()
+        self._items_lock = threading.RLock()
         self._chunk_size: int = int(chunk_size)
 
     def __len__(self):
@@ -57,7 +57,7 @@ class FixedChunkArray(Generic[T]):
                                object=object)
             self._items.append(entry)
         
-        return self.num_item
+        return self.num_item - 1
 
     
     def add_objects(self, objects: Sequence[T]) -> int:

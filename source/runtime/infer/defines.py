@@ -8,21 +8,15 @@ from dataclasses import dataclass
 from source.runtime.container.array import ChunkArrayConcurrent
 
 @dataclass
-class ReconLogging:
-    init_time: int
-    per_view_time: int
-    n_views: int
-    n_inits: int
-    final_step_time: int
-    n_final_steps: int
-    
-    def __init__(self):
-        self.init_time = 0
-        self.per_view_time = 0
-        self.n_views = 0
-        self.n_inits = 0
-        self.final_step_time = 0
-        self.n_final_steps = 0
+class ReconLog:
+    init_time_0       : int = 0
+    init_time_1       : int = 0
+    per_view_time     : int = 0
+    n_views           : int = 0
+    n_inits           : int = 0
+    final_step_time_0 : int = 0
+    final_step_time_1 : int = 0
+    n_final_steps     : int = 0
 
 @dataclass
 class StoreStatus:
@@ -60,7 +54,7 @@ class InferenceStore:
     focal_length_container: ChunkArrayConcurrent[NDArray[np.float32]]
 
     recon_container: ReconStore
-    recon_logging: ReconLogging
+    recon_logging: ReconLog
 
     # 최종 복원된 3D Map Object
     recon_object: Any
@@ -79,8 +73,8 @@ class InferenceStore:
         self.k_depth_container      = ChunkArrayConcurrent(chunk_size=chunk_size)
         self.focal_length_container = ChunkArrayConcurrent(chunk_size=chunk_size)
 
-        self.recon_store = ReconStore()
-        self.recon_logging = ReconLogging()
+        self.recon_container = ReconStore()
+        self.recon_logging = ReconLog()
         
         self.recon_object = None
 
@@ -95,11 +89,13 @@ class EStoreObjectType(IntFlag):
     K_DEPTH       = 0x010
     FOCAL_LENGTH  = 0x020
     RECON_STORE   = 0x040
-    RECON_LOGGING = 0x080
+    RECON_LOG     = 0x080
     RECON_OBJECT  = 0x100
 
     RECON_INFER_OBJECT = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH
     RECON_INFER_NO_DEPTH = RECON_INFER_OBJECT & (~DEPTH)
+    RECON_INFER_OBJECT_WITH_LOG = RECON_INFER_OBJECT | RECON_LOG
+    ALL_OBJECTS = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH | FOCAL_LENGTH | RECON_STORE | RECON_LOG | RECON_OBJECT
 
     def to_enum(value: str) -> 'EStoreObjectType':
         mapping = {
@@ -110,7 +106,7 @@ class EStoreObjectType(IntFlag):
             "k_depth"      : EStoreObjectType.K_DEPTH,
             "focal_length" : EStoreObjectType.FOCAL_LENGTH,
             "recon_store"  : EStoreObjectType.RECON_STORE,
-            "recon_logging": EStoreObjectType.RECON_LOGGING,
+            "recon_log"    : EStoreObjectType.RECON_LOG,
             "recon_object" : EStoreObjectType.RECON_OBJECT,
         }
 

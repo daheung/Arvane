@@ -1,7 +1,9 @@
 import cv2
 import sys
 import time
+import torch
 import logging
+import asyncio
 import numpy as np
 import base64, io
 
@@ -11,8 +13,9 @@ from fastapi import status, Query
 from fastapi import BackgroundTasks, APIRouter, Request, Depends
 from fastapi.responses import Response, JSONResponse
 from fastapi.exceptions import HTTPException
+from numpy.typing import NDArray
 
-from .world_declaration import (
+from .world_decl import (
     WorldCreatePayload,
     WorldDeletePayload, 
     WorldUpdatePayload,
@@ -20,8 +23,9 @@ from .world_declaration import (
     verify_world_update
 )
 
-from ..utils.utils import NDArrayB64
-from ...runtime.infer.store import (
+from source.router.utils.utils import NDArrayB64
+from source.runtime.infer.defines import ReconLog
+from source.runtime.infer.store import (
     EStoreObjectType,
     EStoreOperatorType
 )
@@ -128,15 +132,18 @@ async def world_update(
 
         color = base64.b64decode(buffer_b64)
         color = Image.open(io.BytesIO(color)).convert("RGB")
-        color = np.array(color)
+        color = np.array(color).transpose((2, 0, 1))
+
+        k_color: NDArray = np.array(payload.k_color, dtype=np.float32).reshape((3, 3))
+        pose   : NDArray = np.array(payload.pose   , dtype=np.float32).reshape((4, 4))
 
         arvane_engine.container.update_object_by_task_id(
             task_id,
             objects={
                 'image': (color, ),
-                'k_image': (payload.k_color, ),
-                'k_depth': (payload.k_color, ),
-                'pose': (payload.pose, )
+                'k_image': (k_color, ),
+                'k_depth': (k_color, ),
+                'pose': (pose, )
             },
             tsk_type=EStoreObjectType.RECON_INFER_NO_DEPTH,
             op_type=EStoreOperatorType.INSERT
@@ -155,6 +162,13 @@ async def world_update(
 
         logging.info(f"Updated world for task_id: {task_id}")
         return JSONResponse(content="ok", status_code=status.HTTP_200_OK)
+
+    except ValueError as ve:
+        logging.error(f"Invalid update payload: {ve}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        ) from ve
     
     except Exception as e:
         logging.error(f"Error updating world: {e}")
@@ -163,24 +177,25 @@ async def world_update(
             detail=str(e)
         ) from e
 
-    except ValueError as ve:
-        logging.error(f"Invalid update payload: {ve}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(ve)
-        ) from ve
+
 
 @world_router.post('/start')
 async def world_start(
     payload: WorldStartPayload,
-    background_tasks: BackgroundTasks,
     arvane_engine: ArvaneEngine = Depends(get_arvane_engine),
 ):
     try:
-        background_tasks.add_task(arvane_engine.run_process, payload.task_id)
+        asyncio.create_task(
+            arvane_engine.run_process(payload.task_id)
+        )
+
         return JSONResponse(
-            content={"result": "ok"}, 
-            status_code=status.HTTP_200_OK
+            content={
+                "result": "accepted",
+                "task_id": payload.task_id,
+                "message": "reconstruction started in background",
+            },
+            status_code=status.HTTP_202_ACCEPTED,
         )
     
     except HTTPException as he:
@@ -212,11 +227,11 @@ async def world_status(
         )
 
         resp_json = {
-            "image_count": len(store.get("image", [])),
-            "depth_count": len(store.get("depth", [])),
-            "pose_count" : len(store.get("pose" , [])),
-            "k_image_count": len(store.get("k_image", [])),
-            "k_depth_count": len(store.get("k_depth", [])),
+            "num_image": len(store.get("image", [])),
+            "num_depth": len(store.get("depth", [])),
+            "num_pose" : len(store.get("pose" , [])),
+            "num_k_image": len(store.get("k_image", [])),
+            "num_k_depth": len(store.get("k_depth", [])),
         }
 
         logging.info(f"Status for task_id: {task_id} - {resp_json}")
@@ -231,6 +246,55 @@ async def world_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(ke)
         ) from ke
+
+    except Exception as e:
+        logging.error(f"Error retrieving world status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        ) from e
+    
+
+@world_router.get("/detail")
+async def world_detail(
+    task_id: Annotated[str, Query(..., alias="task_id")],
+    arvane_engine: ArvaneEngine = Depends(get_arvane_engine)
+):
+    try:
+        if (not arvane_engine.container.exists(task_id)):
+            logging.warning(f"Cannot find task_id: {task_id}, create new task_id before get world status.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cannot find task_id, create new task_id before get world status."
+            )
+
+        store = arvane_engine.container.load_object_by_task_id(
+            task_id,
+            tsk_type=EStoreObjectType.ALL_OBJECTS
+        )
+
+        recon_log: Optional[ReconLog] = store.get("recon_log", None)
+        resp_json = {
+            "num_image": len(store.get("image", [])),
+            "num_depth": len(store.get("depth", [])),
+            "num_pose" : len(store.get("pose" , [])),
+            "num_k_image": len(store.get("k_image", [])),
+            "num_k_depth": len(store.get("k_depth", [])),
+            "recon": {
+                "start_init_time": recon_log.init_time_0,
+                "end_init_time": recon_log.init_time_1,
+                "num_inits": recon_log.n_inits,
+                "num_steps": recon_log.n_views,
+                "start_final_time": recon_log.final_step_time_0,
+                "start_final_time": recon_log.final_step_time_1,
+                "per_view_time": recon_log.per_view_time,
+            }
+        }
+
+        return JSONResponse(resp_json, status_code=status.HTTP_200_OK)
+
+    except HTTPException as e:
+        ...
 
     except Exception as e:
         logging.error(f"Error retrieving world status: {e}")

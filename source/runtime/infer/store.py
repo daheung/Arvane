@@ -6,8 +6,13 @@ import uuid as uid
 
 from typing import Any, Dict
 
-from source.runtime.infer.defines import InferenceStore, EStoreOperatorType, EStoreObjectType
 from source.runtime.container.array import ChunkArrayConcurrent
+from source.runtime.infer.defines import (
+    InferenceStore, 
+    EStoreOperatorType, 
+    EStoreObjectType, 
+    ReconLog
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,7 +90,7 @@ class InferenceChunkStoreConcurrent:
 
         return 1
 
-    def load_object_by_task_id(self, task_id: str, tsk_type: EStoreObjectType) -> Dict[str, ChunkArrayConcurrent]:
+    def load_object_by_task_id(self, task_id: str, tsk_type: EStoreObjectType) -> Dict[str, ChunkArrayConcurrent | ReconLog]:
         if not self._check_task_id(task_id):
             raise KeyError(f"Cannot find task_id: current task id: {task_id}")
 
@@ -97,6 +102,9 @@ class InferenceChunkStoreConcurrent:
         if tsk_type & EStoreObjectType.POSE   : ret_container["pose"   ] = store.pose_container
         if tsk_type & EStoreObjectType.K_IMAGE: ret_container["k_image"] = store.k_image_container
         if tsk_type & EStoreObjectType.K_DEPTH: ret_container["k_depth"] = store.k_depth_container
+        if tsk_type & EStoreObjectType.FOCAL_LENGTH: ret_container["f_px"     ] = store.focal_length_container
+        if tsk_type & EStoreObjectType.RECON_STORE : ret_container["recon_con"] = store.recon_container
+        if tsk_type & EStoreObjectType.RECON_LOG   : ret_container["recon_log"] = store.recon_logging
 
         return ret_container
 

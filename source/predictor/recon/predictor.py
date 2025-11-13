@@ -23,7 +23,10 @@ from source.predictor.recon import utils
 from source.predictor.recon import network
 from source.predictor.utils import pad_last
 
+from source.runtime.infer.store import ReconLog
+
 from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
 @dataclass(slots=True)
 class ReconInferArray:
@@ -41,13 +44,6 @@ class ReconInferArray:
     global_coords         : torch.Tensor = None
     running_density_weight: torch.Tensor = None
     running_tsdf_weight   : torch.Tensor = None
-        
-    init_time      : int = 0
-    per_view_time  : int = 0
-    n_views        : int = 0
-    n_inits        : int = 0
-    final_step_time: int = 0
-    n_final_steps  : int = 0
 
 class ReconPro(torch.nn.Module):
     def __init__(self, config):
@@ -278,10 +274,10 @@ class ReconPro(torch.nn.Module):
             scale = torch.rand(len(j), device=self.config.device) * 0.2 + 0.9
             batch["depths"][i, j] *= scale[:, None, None]
 
-    def predict_init(self, batch, infer_object: ReconInferArray) -> ReconInferArray:
+    def predict_init(self, batch, infer_object: ReconInferArray, log: ReconLog) -> Tuple[ReconInferArray, ReconLog]:
         # setup before starting inference on a new scan
         torch.cuda.synchronize()
-        t0 = time.time()
+        log.init_time_0 = time.time()
 
         vox4 = self.config.voxel_size * 4
         minbound = batch["gt_origin"][0]
@@ -327,13 +323,12 @@ class ReconPro(torch.nn.Module):
                 )
 
         torch.cuda.synchronize()
-        t1 = time.time()
-        infer_object.init_time += t1 - t0
-        infer_object.n_inits += 1
+        log.init_time_1 = time.time()
+        log.n_inits += 1
 
-        return infer_object
+        return infer_object, log
 
-    def predict_per_view(self, batch, infer_object: ReconInferArray) -> ReconInferArray:
+    def predict_per_view(self, batch, infer_object: ReconInferArray, log: ReconLog) -> Tuple[ReconInferArray, ReconLog]:
         # fuse each view into the scene volume
         t0 = time.time()
         torch.cuda.synchronize()
@@ -345,7 +340,7 @@ class ReconPro(torch.nn.Module):
         uv, z, valid = utils.project(
             infer_object.global_coords[None],
             batch["poses"][None],
-            batch["K_color"][None],
+            batch["k_image"][None],
             imsize,
         )
         valid = valid[0, 0]
@@ -359,15 +354,15 @@ class ReconPro(torch.nn.Module):
                 batch["images"],
                 batch["depths"],
                 batch["poses"][None],
-                batch["K_color"][None],
-                batch["K_depth"][None],
+                batch["k_image"][None],
+                batch["k_depth"][None],
                 coords,
             )
             if self.depth_guidance.density_fusion_channel:
                 density, density_weight = utils.density_fusion(
                     batch["depths"],
                     batch["poses"][None],
-                    batch["K_depth"][:, None],
+                    batch["k_depth"][:, None],
                     coords,
                     self.config.voxel_size
                 )
@@ -377,7 +372,7 @@ class ReconPro(torch.nn.Module):
                 tsdf, tsdf_weight = utils.tsdf_fusion(
                     batch["depths"],
                     batch["poses"][None],
-                    batch["K_depth"][:, None],
+                    batch["k_depth"][:, None],
                     coords,
                     self.config.voxel_size
                 )
@@ -388,7 +383,7 @@ class ReconPro(torch.nn.Module):
             (img_voxel_feats, img_voxel_valid,) = self.get_img_voxel_feats_by_img_bp(
                 batch["images"],
                 batch["poses"][None],
-                batch["K_color"][None],
+                batch["k_image"][None],
                 coords,
             )
 
@@ -428,16 +423,23 @@ class ReconPro(torch.nn.Module):
 
         t1 = time.time()
         torch.cuda.synchronize()
-        infer_object.per_view_time += t1 - t0
-        infer_object.n_views += 1
+        log.per_view_time += t1 - t0
+        log.n_views += 1
 
-        return infer_object
+        return infer_object, log
 
-    def predict_final(self, batch, infer_object: ReconInferArray, task_id: str, out_path: str=None):
+    def predict_final(
+            self, 
+            batch, 
+            infer_object: ReconInferArray, 
+            log: ReconLog, 
+            task_id: str, 
+            out_path: str=None
+        ) -> Tuple[dict | Any, ReconInferArray, ReconLog]:
         # final reconstruction: run point back-projection & 3d cnn
 
         torch.cuda.synchronize()
-        t0 = time.time()
+        log.final_step_time_0 = time.time()
 
         global_feats = infer_object.M
         global_feats = self.fusion.bn(global_feats[None]).squeeze(0)
@@ -622,8 +624,8 @@ class ReconPro(torch.nn.Module):
                             rgb_img_placeholder,
                             pred_depth_imgs[None],
                             poses[None],
-                            batch["K_color"][:, None],
-                            batch["K_depth"][:, None],
+                            batch["k_image"][:, None],
+                            batch["k_depth"][:, None],
                             chunk_fine_coords[None],
                             use_highres_cnn=True,
                             img_feats=chunk_highres_img_feats,
@@ -632,7 +634,7 @@ class ReconPro(torch.nn.Module):
                         _fine_bp_feats, valid = self.get_img_voxel_feats_by_img_bp(
                             rgb_img_placeholder,
                             poses[None],
-                            batch["K_color"][:, None],
+                            batch["k_image"][:, None],
                             chunk_fine_coords[None],
                             use_highres_cnn=True,
                             img_feats=chunk_highres_img_feats,
@@ -654,7 +656,7 @@ class ReconPro(torch.nn.Module):
                             density, weight = utils.density_fusion(
                                 pred_depth_imgs[None],
                                 poses[None],
-                                batch["K_depth"][:, None],
+                                batch["k_depth"][:, None],
                                 chunk_fine_coords[None],
                                 self.config.voxel_size
                             )
@@ -670,7 +672,7 @@ class ReconPro(torch.nn.Module):
                             tsdf, weight = utils.tsdf_fusion(
                                 pred_depth_imgs[None],
                                 poses[None],
-                                batch["K_depth"][:, None],
+                                batch["k_depth"][:, None],
                                 chunk_fine_coords[None],
                                 self.config.voxel_size
                             )
@@ -738,9 +740,8 @@ class ReconPro(torch.nn.Module):
         fine_surface += 0.5
 
         torch.cuda.synchronize()
-        t1 = time.time()
-        infer_object.final_step_time += t1 - t0
-        infer_object.n_final_steps += 1
+        log.final_step_time_1 = time.time()
+        log.n_final_steps += 1
 
         out_path = os.getcwd() if out_path is None else out_path
         log_path = os.path.join(out_path, "logs/recon")
@@ -763,7 +764,7 @@ class ReconPro(torch.nn.Module):
             print(e)
         else:
             glb_bytes = pred_mesh.export(os.path.join(log_path, f"{name}.glb"), file_type="glb")
-            return glb_bytes
+            return (glb_bytes, infer_object, log)
 
     def predict_step(self, batch, batch_idx):
         if batch["initial_frame"][0]:
@@ -783,15 +784,16 @@ class ReconPro(torch.nn.Module):
             self.predict_final(batch)
 
     # args, kwargs: unreferenced parameters
-    def on_predict_epoch_end(self, infer_object: ReconInferArray, task_id: str, *args, **kwargs):
-        
-        per_init_time = infer_object.init_time / infer_object.n_inits
-        per_view_time = infer_object.per_view_time / infer_object.n_views
-        final_step_time = infer_object.final_step_time / infer_object.n_final_steps
+    def on_predict_epoch_end(self, log: ReconLog, task_id: str, *args, **kwargs):
+        init_time = log.init_time_1 - log.init_time_0
 
-        print(f"{task_id} - per_init_time: {per_init_time:.4f}")
-        print(f"{task_id} - per_view_time: {per_view_time:.4f}")
-        print(f"{task_id} - final_step_time: {final_step_time:.4f}")
+        per_init_time = init_time / log.n_inits
+        per_view_time = log.per_view_time / log.n_views
+        final_step_time = log.final_step_time / log.n_final_steps
+
+        logging.info(f"{task_id} - per_init_time: {per_init_time:.4f}")
+        logging.info(f"{task_id} - per_view_time: {per_view_time:.4f}")
+        logging.info(f"{task_id} - final_step_time: {final_step_time:.4f}")
 
 
 class ReconPredictor:
@@ -809,7 +811,7 @@ class ReconPredictor:
     def init(self):
         self.predictor.to(self.config.device)
     
-    def infer(self, batch, task_id):
+    def infer(self, batch, task_id, log: ReconLog) -> Tuple[dict | Any, ReconLog]:
         if (not self._check_batch(batch)):
             raise ValueError("Input batch is missing required keys.")
 
@@ -817,7 +819,7 @@ class ReconPredictor:
         batch = self._update_gt_if_invalid(batch)
 
         infer_object = ReconInferArray()
-        infer_object = self.predictor.predict_init(batch, infer_object=infer_object)
+        infer_object, log = self.predictor.predict_init(batch, infer_object=infer_object, log=log)
 
         batch_iterator = data.ReconIterator(batch)
         batch_step: int = 1
@@ -828,7 +830,7 @@ class ReconPredictor:
             total=batch_length, 
             desc="Extract image features"
         ):
-            infer_object = self.predictor.predict_per_view(frame, infer_object=infer_object)
+            infer_object, log = self.predictor.predict_per_view(frame, infer_object=infer_object, log=log)
 
             if self.config.point_backprojection:
                 # store any frames that are marked as keyframes for later point back-projection
@@ -837,14 +839,24 @@ class ReconPredictor:
                 if self.predictor.depth_guidance.enabled:
                     infer_object.depths.append(frame["depths"][0, 0])
 
-                infer_object.k_color.append(frame["K_color"])
-                infer_object.k_depth.append(frame["K_depth"])
+                infer_object.k_color.append(frame["k_image"])
+                infer_object.k_depth.append(frame["k_depth"])
 
             if (frame_idx == (batch_length) - 1):
                 logging.info(f"Start inference final step. task id: {task_id}")
                 temp_path = os.path.join(os.getcwd(), "Test/source/predictor")
-                glb_bytes = self.predictor.predict_final(frame, infer_object=infer_object, task_id=task_id, out_path=temp_path)
-                self.predictor.on_predict_epoch_end(infer_object=infer_object, task_id=task_id)
+                glb_bytes, infer_object, log = self.predictor.predict_final(
+                    frame, 
+                    infer_object=infer_object, 
+                    log=log, 
+                    task_id=task_id, 
+                    out_path=temp_path
+                )
+
+                self.predictor.on_predict_epoch_end(
+                    infer_object=infer_object,
+                    task_id=task_id
+                )
 
         return glb_bytes
 
@@ -853,8 +865,8 @@ class ReconPredictor:
             "images",
             "depths",
             "poses",
-            "K_color",
-            "K_depth",
+            "k_image",
+            "k_depth",
             "gt_origin",
             "gt_maxbound",
         ]
