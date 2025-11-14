@@ -105,7 +105,8 @@ class InferenceChunkStoreConcurrent:
         if tsk_type & EStoreObjectType.FOCAL_LENGTH: ret_container["f_px"     ] = store.focal_length_container
         if tsk_type & EStoreObjectType.RECON_STORE : ret_container["recon_con"] = store.recon_container
         if tsk_type & EStoreObjectType.RECON_LOG   : ret_container["recon_log"] = store.recon_logging
-
+        if tsk_type & EStoreObjectType.RECON_RESULT: ret_container["recon_result"] = store.recon_object
+        if tsk_type & EStoreObjectType.RECON_STATUS: ret_container["recon_status"] = store.store_status
         return ret_container
 
     def exists(self, task_id: str) -> bool:

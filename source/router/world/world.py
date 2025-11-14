@@ -302,3 +302,48 @@ async def world_detail(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         ) from e
+    
+
+@world_router.get("/result")
+async def world_result(
+    task_id: Annotated[str, Query(..., alias="task_id")],
+    arvane_engine: ArvaneEngine = Depends(get_arvane_engine)
+):
+    try:
+        if (not arvane_engine.container.exists(task_id)):
+            logging.warning(f"Cannot find task_id: {task_id}, create new task_id before get world status.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cannot find task_id, create new task_id before get world status."
+            )
+
+        result = arvane_engine.container.load_object_by_task_id(
+            task_id=task_id,
+            tsk_type=EStoreObjectType.RECON_RESULT | EStoreObjectType.RECON_STATUS
+        )
+
+        glb_bytes = result['recon_result']
+        if (glb_bytes is None):
+            return JSONResponse(
+                content={ 
+                    "status": f'inference {str(result['recon_status'])}.',
+                }, 
+                status_code=status.HTTP_202_ACCEPTED 
+            )
+        
+        return Response(
+            content=glb_bytes,
+            media_type="model/gltf-binary",
+            headers={
+                "Content-Disposition": 'inline; filename="generated.glb"'
+            }
+        )
+
+    except HTTPException as e:
+        raise e
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )

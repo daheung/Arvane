@@ -6,7 +6,7 @@ import torch
 import logging
 import numpy as np
 
-from typing import List, Any
+from typing import List, Any, Dict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -811,7 +811,7 @@ class ReconPredictor:
     def init(self):
         self.predictor.to(self.config.device)
     
-    def infer(self, batch, task_id, log: ReconLog) -> Tuple[dict | Any, ReconLog]:
+    def infer(self, batch: Dict[str, torch.Tensor], task_id, log: ReconLog) -> Tuple[dict | Any, ReconLog]:
         if (not self._check_batch(batch)):
             raise ValueError("Input batch is missing required keys.")
 

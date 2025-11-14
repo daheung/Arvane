@@ -2,7 +2,7 @@ import torch
 import numpy as np
 
 from enum import IntFlag
-from typing import Any
+from typing import Any, Optional
 from numpy.typing import NDArray
 from dataclasses import dataclass
 from source.runtime.container.array import ChunkArrayConcurrent
@@ -57,7 +57,7 @@ class InferenceStore:
     recon_logging: ReconLog
 
     # 최종 복원된 3D Map Object
-    recon_object: Any
+    recon_object: Optional[Any]
 
     def __init__(self, user_id: str, task_id: str, chunk_size: int):
         self.user_id = user_id
@@ -91,11 +91,13 @@ class EStoreObjectType(IntFlag):
     RECON_STORE   = 0x040
     RECON_LOG     = 0x080
     RECON_OBJECT  = 0x100
+    RECON_RESULT  = 0x200
+    RECON_STATUS  = 0x400
 
     RECON_INFER_OBJECT = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH
     RECON_INFER_NO_DEPTH = RECON_INFER_OBJECT & (~DEPTH)
     RECON_INFER_OBJECT_WITH_LOG = RECON_INFER_OBJECT | RECON_LOG
-    ALL_OBJECTS = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH | FOCAL_LENGTH | RECON_STORE | RECON_LOG | RECON_OBJECT
+    ALL_OBJECTS = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH | FOCAL_LENGTH | RECON_STORE | RECON_LOG | RECON_OBJECT | RECON_RESULT | RECON_STATUS
 
     def to_enum(value: str) -> 'EStoreObjectType':
         mapping = {
@@ -108,6 +110,25 @@ class EStoreObjectType(IntFlag):
             "recon_store"  : EStoreObjectType.RECON_STORE,
             "recon_log"    : EStoreObjectType.RECON_LOG,
             "recon_object" : EStoreObjectType.RECON_OBJECT,
+            "recon_result" : EStoreObjectType.RECON_RESULT,
+            "recon_status" : EStoreObjectType.RECON_STATUS
+        }
+    
+        return mapping.get(value.lower(), None)
+
+    def __str__(self, value: 'EStoreObjectType') -> str:
+        mapping = {
+            EStoreObjectType.IMAGE        : "image"       ,
+            EStoreObjectType.DEPTH        : "depth"       ,
+            EStoreObjectType.POSE         : "pose"        ,
+            EStoreObjectType.K_IMAGE      : "k image"     ,
+            EStoreObjectType.K_DEPTH      : "k depth"     ,
+            EStoreObjectType.FOCAL_LENGTH : "focal length",
+            EStoreObjectType.RECON_STORE  : "reconstruction store" ,
+            EStoreObjectType.RECON_LOG    : "reconstruction log"   ,
+            EStoreObjectType.RECON_OBJECT : "reconstruction object",
+            EStoreObjectType.RECON_RESULT : "reconstruction result",
+            EStoreObjectType.RECON_STATUS : "reconstruction status"
         }
 
-        return mapping.get(value.lower(), None)
+        return mapping.get(value.lower(), "")

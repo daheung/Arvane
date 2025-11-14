@@ -222,7 +222,7 @@ class ArvaneEngine:
         recon_device: torch.device = torch.device(self.recon_predictor.config.device)
         images  : NDArray = np.array(image_container  .get_raw_objects(), dtype=np.uint8  )
         depths  : NDArray = np.array(depth_container  .get_raw_objects(), dtype=np.float32)
-        poses   : NDArray = np.array(pose_container   .get_raw_objects(), dtype=np.float32)
+        poses   : NDArray = np.array(pose_container   .get_raw_objects(), dtype=np.float64)
         k_images: NDArray = np.array(k_image_container.get_raw_objects(), dtype=np.float32)
         k_depths: NDArray = np.array(k_depth_container.get_raw_objects(), dtype=np.float32)
 
@@ -260,7 +260,7 @@ class ArvaneEngine:
         batch = {
             "images"     : torch.tensor(images  , dtype=torch.float32, device=recon_device),
             "depths"     : torch.tensor(depths  , dtype=torch.float32, device=recon_device),
-            "poses"      : torch.tensor(poses   , dtype=torch.float32, device=recon_device),
+            "poses"      : torch.tensor(poses   , dtype=torch.float64, device=recon_device),
             "k_image"    : torch.tensor(k_images, dtype=torch.float32, device=recon_device),
             "k_depth"    : torch.tensor(k_depths, dtype=torch.float32, device=recon_device),
             "gt_origin"  : gt_origin  [None, ...],
