@@ -326,7 +326,7 @@ async def world_result(
         if (glb_bytes is None):
             return JSONResponse(
                 content={ 
-                    "status": f'inference {str(result['recon_status'])}.',
+                    "status": f'inference {str(result["recon_status"])}.',
                 }, 
                 status_code=status.HTTP_202_ACCEPTED 
             )
