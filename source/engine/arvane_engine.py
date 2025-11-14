@@ -21,6 +21,7 @@ from source.runtime.infer.defines import StoreStatus, EStoreObjectType, EStoreOp
 from source.engine.defines import TaskStatus
 from source.runtime.container.array import ChunkArrayConcurrent
 from source.runtime.executor.infer_task_executor import InferenceThreadExecutor
+from source.runtime.device.device_manager import DeviceManager, DeviceDescriptor
 
 class ArvaneEngine:
     depth_predictor: DepthPredictor
@@ -29,16 +30,16 @@ class ArvaneEngine:
     container: InferenceChunkStoreConcurrent
 
     proxy_executor: InferenceThreadExecutor
+    device_manager: DeviceManager
 
     def __init__(self):
         logging.info("Initializing ArvaneEngine ...")
-        depth_config, recon_config = load_config()
-    
-        depth_predictor = DepthPredictor(depth_config)
-        depth_predictor.init()
 
-        recon_predictor = ReconPredictor(recon_config)
-        recon_predictor.init()
+        # init device manater
+        self.device_manager = DeviceManager()
+
+        # init predictors
+        depth_predictor, recon_predictor = self.__predictor_init()
 
         # set app state dependencies
         self.depth_predictor = depth_predictor
@@ -50,6 +51,37 @@ class ArvaneEngine:
         # init proxy executor
         self.proxy_executor = InferenceThreadExecutor()
 
+    def __predictor_init(self) -> Tuple[DepthPredictor, ReconPredictor]:
+        # load configuraion depth and resonstruction model.
+        depth_config, recon_config = load_config()
+
+        depth_device: Tuple[int, DeviceDescriptor] = self.device_manager.get_gpu_considering_slack()
+        depth_config.device = depth_device[1].device
+        depth_predictor = DepthPredictor(depth_config)
+        depth_predictor.init()
+
+        recon_device: Tuple[int, DeviceDescriptor] = self.device_manager.get_gpu_considering_slack()
+        recon_config.device = recon_device[1].device
+        recon_predictor = ReconPredictor(recon_config)
+        recon_predictor.init()
+
+        self.device_manager._gpu_update()
+        depth_device: DeviceDescriptor = self.device_manager.gpu_desc(depth_device[0])
+        total_memory_per_mib = int(depth_device.dedicated_video_memory.total_memory / (1024 ** 2))
+        free_memory_per_mib = int(depth_device.dedicated_video_memory.free_memory / (1024 ** 2))
+        logging.info(f"Depth inference model binded gpu slot {depth_device.device_index}.")
+        logging.info(f"  Gpu total memory: {total_memory_per_mib} Mib.")
+        logging.info(f"  Gpu free  memory: {free_memory_per_mib} Mib")
+        
+        recon_device: DeviceDescriptor = self.device_manager.gpu_desc(recon_device[0])
+        total_memory_per_mib = int(recon_device.dedicated_video_memory.total_memory / (1024 ** 2))
+        free_memory_per_mib = int(recon_device.dedicated_video_memory.free_memory / (1024 ** 2))
+        logging.info(f"Reconstruction inference model binded gpu slot {recon_device.device_index}.")
+        logging.info(f"  Gpu total memory: {total_memory_per_mib} Mib.")
+        logging.info(f"  Gpu free  memory: {free_memory_per_mib} Mib.")
+
+        return depth_predictor, recon_predictor
+    
     async def run_process(self, task_id: str):
         try:
             self.container[task_id].store_status = StoreStatus.DEPTH

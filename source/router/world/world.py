@@ -32,6 +32,7 @@ from source.runtime.infer.store import (
 
 from source.engine.arvane_engine import ArvaneEngine
 from source.runtime.infer.store import InferenceChunkStoreConcurrent
+from source.runtime.infer.defines import StoreStatus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -274,13 +275,15 @@ async def world_detail(
         )
 
         recon_log: Optional[ReconLog] = store.get("recon_log", None)
+        recon_res: Optional[StoreStatus] = store.get("recon_result", None)
         resp_json = {
+            "status": str(recon_res),
             "num_image": len(store.get("image", [])),
             "num_depth": len(store.get("depth", [])),
             "num_pose" : len(store.get("pose" , [])),
             "num_k_image": len(store.get("k_image", [])),
             "num_k_depth": len(store.get("k_depth", [])),
-            "recon": {
+            "reconstruction": {
                 "start_init_time": recon_log.init_time_0,
                 "end_init_time": recon_log.init_time_1,
                 "num_inits": recon_log.n_inits,
