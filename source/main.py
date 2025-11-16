@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = "expandable_segments:True"
+
 MAX_LOG_BODY = 2048  # 바디 로그는 2KB만 저장(과도한 로그/개인정보 보호)
 
 def _format_validation_errors(errors: list[dict]) -> list[str]:
