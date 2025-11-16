@@ -308,17 +308,19 @@ class DepthPro(nn.Module):
 class DepthPredictor:
     def __init__(self, config):
         predictor, transformer = create_model_and_transforms(config)
+        predictor.eval()
 
         self.config = config
         self.predictor = predictor
         self.transformer = transformer
-
+        
     def init(self):
         self.predictor = self.predictor.to(device=self.config.device)
 
     def infer(self, rgb_imgs: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
         rgb_imgs = self.transformer(rgb_imgs).to(self.config.device)
-        output = self.predictor.infer(rgb_imgs)
+        with torch.no_grad():
+            output = self.predictor.infer(rgb_imgs)
 
         depth = output["depth"].cpu().squeeze()
         f_px = output["focallength_px"].cpu().squeeze()

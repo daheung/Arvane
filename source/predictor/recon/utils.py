@@ -181,7 +181,8 @@ def estimate_volume_bounds_from_recon_datas(
     max_depth = 3.5,
     voxel_size = 0.02,
     margin = None,
-    device = None
+    device = None,
+    ret_tsdf = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     margin = int(np.round(0.04 / voxel_size))
     _, _, imheight, imwidth = depths.shape
@@ -199,7 +200,7 @@ def estimate_volume_bounds_from_recon_datas(
         pose = poses[i]
         if np.any(np.isinf(pose)):
             continue
-        depth = depths[i, 0, ...] / 1000
+        depth = depths[i, 0, ...]
         depth[depth > max_depth] = 0
         depth = depth[uv[:, 1], uv[:, 0]]
         valid = depth > 0
@@ -232,7 +233,7 @@ def estimate_volume_bounds_from_recon_datas(
         pose = poses[i]
         if np.any(np.isinf(pose)):
             continue
-        depth = depths[i, 0, ...] / 1000
+        depth = depths[i, 0, ...]
         depth[depth > max_depth] = 0
         tsdf_vol.integrate(
             torch.from_numpy(depth),
@@ -251,4 +252,8 @@ def estimate_volume_bounds_from_recon_datas(
 
     maxbound = origin + voxel_size * torch.tensor(tsdf.shape)
 
-    return tsdf, origin, maxbound
+    return (
+        tsdf if ret_tsdf else None,
+        origin,
+        maxbound,
+    )

@@ -95,9 +95,11 @@ class ArvaneEngine:
             ):
                 logging.warning(f"Auto-update depth failed (bg) for task_id={task_id}, status={depth_status}")
 
+            user_id = self.container[task_id].user_id
             self.container[task_id].store_status = StoreStatus.RECON
             result: Tuple[TaskStatus, Any] = await self.proxy_executor.execute(
-                self._inference_recon_impl, 
+                self._inference_recon_impl,
+                user_id, 
                 task_id
             )
             recon_status, glb_bytes = result
@@ -107,14 +109,17 @@ class ArvaneEngine:
 
             self.container[task_id].store_status = StoreStatus.DONE
             self.container[task_id].recon_object = glb_bytes
+            
             ...
+
+            
         except Exception as e:
             self.container[task_id].store_status = StoreStatus.ABORTED
             logging.exception(f"Auto-update crashed (bg) for task_id={task_id}: {e}")
 
         finally:
             ...
-            
+    
     async def update_depth_object_by_task_id(self, task_id: str):
         try:
             status = await self.proxy_executor.execute(self._update_depth_object_by_task_id, task_id)
@@ -168,7 +173,6 @@ class ArvaneEngine:
 
         return TaskStatus.SUCCESS
         
-
     async def update_recon_object_by_task_id(
         self,
         task_id: str, 
@@ -203,7 +207,7 @@ class ArvaneEngine:
 
     def _inference_depth_and_f_px_impl(self, image: NDArray[np.uint8]) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
         # 이미지를 모델에 넣을 수 있는 크기로 전처리 [width: 640, height: 480]
-        image = cv2.resize(image, (480, 640), interpolation=cv2.INTER_AREA)
+        image = cv2.resize(image, (640, 480), interpolation=cv2.INTER_AREA)
 
         depth, f_px = self.depth_predictor.infer(image)
         return (
@@ -211,24 +215,29 @@ class ArvaneEngine:
             f_px .to('cpu', dtype=torch.float32).numpy()
         )
 
-    def inference_recon(self, task_id: str) -> Tuple[TaskStatus, Optional[Any]]:
-        return self._inference_recon_impl(task_id)
+    def inference_recon(self, user_id: str, task_id: str) -> Tuple[TaskStatus, Optional[Any]]:
+        return self._inference_recon_impl(user_id, task_id)
 
-    def _inference_recon_impl(self, task_id: str) -> Tuple[TaskStatus, Optional[Any]]:
+    def _inference_recon_impl(
+        self, 
+        user_id: str, 
+        task_id: str
+    ) -> Tuple[TaskStatus, Optional[Any]]:
         if not self.container.exists(task_id):
             logging.warning(f"Task was aborted. Cannot find task_id: {task_id}, create new task_id before infer recon.")
             return TaskStatus.ABORTED
         
-        store = self.container.load_object_by_task_id(
-            task_id, 
-            EStoreObjectType.RECON_INFER_OBJECT_WITH_LOG
-        )
+        # store = self.container.load_object_by_task_id(
+        #     task_id, 
+        #     EStoreObjectType.RECON_INFER_OBJECT_WITH_LOG
+        # )
 
-        image_container   : ChunkArrayConcurrent | None = store["image"       ] or None
-        depth_container   : ChunkArrayConcurrent | None = store["depth"       ] or None
-        pose_container    : ChunkArrayConcurrent | None = store["pose"        ] or None
-        k_image_container : ChunkArrayConcurrent | None = store["k_image"     ] or None
-        k_depth_container : ChunkArrayConcurrent | None = store["k_depth"     ] or None
+        store = self.container[task_id]
+        image_container   : ChunkArrayConcurrent | None = store.image_container   or None
+        depth_container   : ChunkArrayConcurrent | None = store.depth_container   or None
+        pose_container    : ChunkArrayConcurrent | None = store.pose_container    or None
+        k_image_container : ChunkArrayConcurrent | None = store.k_image_container or None
+        k_depth_container : ChunkArrayConcurrent | None = store.k_depth_container or None
 
         assert (image_container   is not None, "Image container is None, but must be initialized already."  )
         assert (depth_container   is not None, "Depth container is None, but must be initialized already."  )
@@ -266,10 +275,10 @@ class ArvaneEngine:
         k_images[1] *= TARGET_HEIGHT / imheight
         k_images: NDArray = np.array([k_images for _ in range(len(k_image_container))])
 
-        _, dpheight, dpwidth = depths.shape
+        # _, dpheight, dpwidth = depths.shape
         k_depths = k_depths[0]
-        k_depths[0] *= TARGET_WIDTH / dpwidth
-        k_depths[1] *= TARGET_HEIGHT / dpheight
+        k_depths[0] *= TARGET_WIDTH / imwidth
+        k_depths[1] *= TARGET_HEIGHT / imheight
         k_depths: NDArray = np.array([k_depths for _ in range(len(k_depth_container))])
 
         images = images.transpose((0, 2, 3, 1))
@@ -281,33 +290,42 @@ class ArvaneEngine:
         depths = np.stack(depths, axis=0)
         depths = depths.astype(dtype=np.float32)[:, None, ...]
 
-        _, gt_origin, gt_maxbound = estimate_volume_bounds_from_recon_datas(
-            depths, 
-            poses, 
-            k_images[0], 
-            device=recon_device
-        )
+        # import pdb; pdb.set_trace()
+        with torch.no_grad():
+            _, gt_origin, gt_maxbound = estimate_volume_bounds_from_recon_datas(
+                depths, 
+                poses, 
+                k_images[0],
+                device=recon_device,
+                ret_tsdf=False
+            )
+        
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
         # Create ReconPredictor batch data
         batch = {
-            "images"     : torch.tensor(images  , dtype=torch.float32, device=recon_device),
-            "depths"     : torch.tensor(depths  , dtype=torch.float32, device=recon_device),
-            "poses"      : torch.tensor(poses   , dtype=torch.float64, device=recon_device),
-            "k_image"    : torch.tensor(k_images, dtype=torch.float32, device=recon_device),
-            "k_depth"    : torch.tensor(k_depths, dtype=torch.float32, device=recon_device),
+            "images"     : torch.tensor(images  , dtype=torch.float32),
+            "depths"     : torch.tensor(depths  , dtype=torch.float32),
+            "poses"      : torch.tensor(poses   , dtype=torch.float32),
+            "k_image"    : torch.tensor(k_images, dtype=torch.float32),
+            "k_depth"    : torch.tensor(k_depths, dtype=torch.float32),
             "gt_origin"  : gt_origin  [None, ...],
             "gt_maxbound": gt_maxbound[None, ...]
             # "gt_origin"  : torch.tensor((0, )),
             # "gt_maxbound": torch.tensor((0, )),
         }
 
-        import pdb; pdb.set_trace()
-        log = store["recon_log"]
-        glb_bytes = self.recon_predictor.infer(
-            batch=batch,
-            task_id=task_id,
-            log=log
-        )
+        # import pdb; pdb.set_trace()
+        log = store.recon_log
+        with torch.no_grad():
+            glb_bytes = self.recon_predictor.infer(
+                batch=batch,
+                user_id=user_id,
+                task_id=task_id,
+                device=recon_device,
+                log=log,
+            )
 
         return (TaskStatus.SUCCESS, glb_bytes)
 

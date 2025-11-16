@@ -716,23 +716,27 @@ class Dataset(torch.utils.data.Dataset):
         return result
 
 class ReconIterator:
-    def __init__(self, batch: Dict[str, Any]):
-        self.batch: Dict[str, Any] = batch
+    def __init__(self, batch: Dict[str, torch.Tensor], enable_padding: bool = False):
+        # self.batch: Dict[str, torch.Tensor] = batch
         
-        self.keys   : List[str] = list(batch.keys())
-        self.values : List[Any] = list(batch.values())
-        self.lengths: List[int] = [len(value) for value in self.values]
-        self.length : int       = max(self.lengths) if self.lengths else 0
+        keys   : List[str] = list(batch.keys())
+        values : List[torch.Tensor] = list(batch.values())
+        lengths: List[int] = [len(value) for value in values]
         
-        padded_values: List[Any] = [pad_last(value, self.length) for value in self.values]
-        self.data: Dict[str, Any] = {key: value for key, value in zip(self.keys, padded_values)}
+        self.length : int = max(lengths) if lengths else 0
+        
+        considering_pad_values: List[torch.Tensor] = values
+        if (enable_padding):
+            considering_pad_values = [pad_last(value, self.length) for value in values]
+
+        self.data: Dict[str, torch.Tensor] = { key: value for key, value in zip(keys, considering_pad_values) }
 
     @torch.no_grad()
-    def __getitem__(self, index: int) -> Tuple[int, Dict[str, Any]]:
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         return { key: value[index:index + 1] for key, value in self.data.items() }
     
     @torch.no_grad()
-    def __iter__(self) -> Iterator[Dict[str, Any]]:
+    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
         for idx in range(self.length):
             yield self.__getitem__(idx)
 

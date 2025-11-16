@@ -54,7 +54,7 @@ class InferenceStore:
     focal_length_container: ChunkArrayConcurrent[NDArray[np.float32]]
 
     recon_container: ReconStore
-    recon_logging: ReconLog
+    recon_log: ReconLog
 
     # 최종 복원된 3D Map Object
     recon_object: Optional[Any]
@@ -74,7 +74,7 @@ class InferenceStore:
         self.focal_length_container = ChunkArrayConcurrent(chunk_size=chunk_size)
 
         self.recon_container = ReconStore()
-        self.recon_logging = ReconLog()
+        self.recon_log = ReconLog()
         
         self.recon_object = None
 
@@ -82,22 +82,25 @@ class EStoreOperatorType(IntFlag):
     INSERT = 0x01
 
 class EStoreObjectType(IntFlag):
-    IMAGE         = 0x001
-    DEPTH         = 0x002
-    POSE          = 0x004
-    K_IMAGE       = 0x008
-    K_DEPTH       = 0x010
-    FOCAL_LENGTH  = 0x020
-    RECON_STORE   = 0x040
-    RECON_LOG     = 0x080
-    RECON_OBJECT  = 0x100
-    RECON_RESULT  = 0x200
-    RECON_STATUS  = 0x400
+    IMAGE         = 0x0001
+    DEPTH         = 0x0002
+    POSE          = 0x0004
+    K_IMAGE       = 0x0008
+    K_DEPTH       = 0x0010
+    FOCAL_LENGTH  = 0x0020
+    RECON_STORE   = 0x0040
+    RECON_LOG     = 0x0080
+    RECON_OBJECT  = 0x0100
+    RECON_RESULT  = 0x0200
+    RECON_STATUS  = 0x0400
+
+    USER_ID       = 0x0800
+    TASK_ID       = 0x1000
 
     RECON_INFER_OBJECT = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH
     RECON_INFER_NO_DEPTH = RECON_INFER_OBJECT & (~DEPTH)
     RECON_INFER_OBJECT_WITH_LOG = RECON_INFER_OBJECT | RECON_LOG
-    ALL_OBJECTS = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH | FOCAL_LENGTH | RECON_STORE | RECON_LOG | RECON_OBJECT | RECON_RESULT | RECON_STATUS
+    ALL_OBJECTS = IMAGE | DEPTH | POSE | K_IMAGE | K_DEPTH | FOCAL_LENGTH | RECON_STORE | RECON_LOG | RECON_OBJECT | RECON_RESULT | RECON_STATUS | USER_ID | TASK_ID
 
     def to_enum(value: str) -> 'EStoreObjectType':
         mapping = {
@@ -111,7 +114,10 @@ class EStoreObjectType(IntFlag):
             "recon_log"    : EStoreObjectType.RECON_LOG,
             "recon_object" : EStoreObjectType.RECON_OBJECT,
             "recon_result" : EStoreObjectType.RECON_RESULT,
-            "recon_status" : EStoreObjectType.RECON_STATUS
+            "recon_status" : EStoreObjectType.RECON_STATUS,
+
+            "user_id"      : EStoreObjectType.USER_ID,
+            "task_id"      : EStoreObjectType.TASK_ID,
         }
     
         return mapping.get(value.lower(), None)
@@ -128,7 +134,10 @@ class EStoreObjectType(IntFlag):
             EStoreObjectType.RECON_LOG    : "reconstruction log"   ,
             EStoreObjectType.RECON_OBJECT : "reconstruction object",
             EStoreObjectType.RECON_RESULT : "reconstruction result",
-            EStoreObjectType.RECON_STATUS : "reconstruction status"
+            EStoreObjectType.RECON_STATUS : "reconstruction status",
+
+            EStoreObjectType.USER_ID      : "user id",
+            EStoreObjectType.TASK_ID      : "task id"
         }
 
         return mapping.get(value.lower(), "")

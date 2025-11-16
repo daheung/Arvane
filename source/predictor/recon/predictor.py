@@ -26,7 +26,7 @@ from source.predictor.utils import pad_last
 from source.runtime.infer.store import ReconLog
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional    
 
 @dataclass(slots=True)
 class ReconInferArray:
@@ -40,11 +40,19 @@ class ReconInferArray:
     running_count         : torch.Tensor = None
     running_density       : torch.Tensor = None
     running_tsdf          : torch.Tensor = None
-    global_step           : torch.Tensor = None
     global_coords         : torch.Tensor = None
     running_density_weight: torch.Tensor = None
     running_tsdf_weight   : torch.Tensor = None
 
+@dataclass(slots=True)
+class ReconSession:
+    user_id    : str
+    task_id    : str
+    out_path   : Optional[str] = None
+
+    infer      : ReconInferArray = field(default_factory=ReconInferArray)
+    log        : ReconLog        = field(default_factory=ReconLog)
+    
 class ReconPro(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -209,7 +217,9 @@ class ReconPro(torch.nn.Module):
             K = K_color.clone()
             K[:, :, 0] *= featwidth / imwidth
             K[:, :, 1] *= featheight / imheight
-            with torch.autocast(enabled=False, device_type=self.config.device):
+
+            device: torch.device = self.config.device
+            with torch.autocast(enabled=False, device_type=device.type):
                 xyz_cam = (torch.inverse(poses.float()) @ xyz)[:, :, :3]
                 uv = K @ xyz_cam
             uv = uv[:, :, :2] / uv[:, :, 2:]
@@ -263,21 +273,10 @@ class ReconPro(torch.nn.Module):
         )[:, :, 0, 0]
         return point_feats, point_valid
 
-    def augment_depth_inplace(self, batch):
-        n_views = batch["depths"].shape[1]
-        n_augment = n_views // 2
-
-        for i in range(len(batch["depths"])):
-            j = np.random.choice(
-                batch["depths"].shape[1], size=n_augment, replace=False
-            )
-            scale = torch.rand(len(j), device=self.config.device) * 0.2 + 0.9
-            batch["depths"][i, j] *= scale[:, None, None]
-
-    def predict_init(self, batch, infer_object: ReconInferArray, log: ReconLog) -> Tuple[ReconInferArray, ReconLog]:
+    def predict_init(self, batch, session: ReconSession) -> None:
         # setup before starting inference on a new scan
         torch.cuda.synchronize()
-        log.init_time_0 = time.time()
+        session.log.init_time_0 = time.time()
 
         vox4 = self.config.voxel_size * 4
         minbound = batch["gt_origin"][0]
@@ -294,41 +293,39 @@ class ReconPro(torch.nn.Module):
             minbound[2], maxbound[2], self.config.voxel_size, dtype=torch.float32
         )
         xx, yy, zz = torch.meshgrid(x, y, z, indexing="ij")
-        infer_object.global_coords = torch.stack((xx, yy, zz), dim=-1).to(self.config.device)
+        session.infer.global_coords = torch.stack((xx, yy, zz), dim=-1).to(self.config.device)
 
         nvox = xx.shape
-        infer_object.running_count = torch.zeros(nvox, dtype=torch.float32, device=self.config.device)
-        infer_object.M = torch.zeros(
+        session.infer.running_count = torch.zeros(nvox, dtype=torch.float32, device=self.config.device)
+        session.infer.M = torch.zeros(
             (self.fusion.out_c, *nvox),
             dtype=torch.float32,
             device=self.config.device,
         )
 
         if self.depth_guidance.enabled:
-            infer_object.depths = []
+            session.infer.depths = []
 
             if self.depth_guidance.density_fusion_channel:
-                infer_object.running_density = torch.zeros(
+                session.infer.running_density = torch.zeros(
                     nvox, dtype=torch.float32, device=self.config.device
                 )
-                infer_object.running_density_weight = torch.zeros(
+                session.infer.running_density_weight = torch.zeros(
                     nvox, dtype=torch.int32, device=self.config.device
                 )
             elif self.depth_guidance.tsdf_fusion_channel:
-                infer_object.running_tsdf = torch.zeros(
+                session.infer.running_tsdf = torch.zeros(
                     nvox, dtype=torch.float32, device=self.config.device
                 )
-                infer_object.running_tsdf_weight = torch.zeros(
+                session.infer.running_tsdf_weight = torch.zeros(
                     nvox, dtype=torch.int32, device=self.config.device
                 )
 
         torch.cuda.synchronize()
-        log.init_time_1 = time.time()
-        log.n_inits += 1
-
-        return infer_object, log
-
-    def predict_per_view(self, batch, infer_object: ReconInferArray, log: ReconLog) -> Tuple[ReconInferArray, ReconLog]:
+        session.log.init_time_1 = time.time()
+        session.log.n_inits += 1
+    
+    def predict_per_view(self, batch, session: ReconSession) -> None:
         # fuse each view into the scene volume
         t0 = time.time()
         torch.cuda.synchronize()
@@ -338,13 +335,13 @@ class ReconPro(torch.nn.Module):
         assert batch_size == 1 and n_imgs == 1
 
         uv, z, valid = utils.project(
-            infer_object.global_coords[None],
+            session.infer.global_coords[None],
             batch["poses"][None],
             batch["k_image"][None],
             imsize,
         )
         valid = valid[0, 0]
-        coords = infer_object.global_coords[valid][None, None, None]
+        coords = session.infer.global_coords[valid][None, None, None]
 
         if self.depth_guidance.enabled:
             (
@@ -393,55 +390,49 @@ class ReconPro(torch.nn.Module):
         """
         img_voxel_feats.masked_fill_(~img_voxel_valid[:, :, None], 0)
 
-        old_count = infer_object.running_count[valid].clone()
-        infer_object.running_count[valid] += img_voxel_valid[0, 0, 0, 0]
-        new_count = infer_object.running_count[valid]
+        old_count = session.infer.running_count[valid].clone()
+        session.infer.running_count[valid] += img_voxel_valid[0, 0, 0, 0]
+        new_count = session.infer.running_count[valid]
 
         x = img_voxel_feats[0, 0, :, 0, 0]
-        old_m = infer_object.M[:, valid]
+        old_m = session.infer.M[:, valid]
         new_m = x / new_count[None] + (old_count / new_count)[None] * old_m
-        infer_object.M[:, valid] = new_m
-        infer_object.M.masked_fill_(infer_object.running_count[None] == 0, 0)
+        session.infer.M[:, valid] = new_m
+        session.infer.M.masked_fill_(session.infer.running_count[None] == 0, 0)
 
         if self.depth_guidance.enabled:
             if self.depth_guidance.density_fusion_channel:
-                old_count = infer_object.running_density_weight[valid]
-                infer_object.running_density_weight[valid] += density_weight
-                new_count = infer_object.running_density_weight[valid]
+                old_count = session.infer.running_density_weight[valid]
+                session.infer.running_density_weight[valid] += density_weight
+                new_count = session.infer.running_density_weight[valid]
                 denom = new_count + (new_count == 0)
-                infer_object.running_density[valid] = (
-                    density / denom + (old_count / denom) * infer_object.running_density[valid]
+                session.infer.running_density[valid] = (
+                    density / denom + (old_count / denom) * session.infer.running_density[valid]
                 )
             elif self.depth_guidance.tsdf_fusion_channel:
-                old_count = infer_object.running_tsdf_weight[valid]
-                infer_object.running_tsdf_weight[valid] += tsdf_weight
-                new_count = infer_object.running_tsdf_weight[valid]
+                old_count = session.infer.running_tsdf_weight[valid]
+                session.infer.running_tsdf_weight[valid] += tsdf_weight
+                new_count = session.infer.running_tsdf_weight[valid]
                 denom = new_count + (new_count == 0)
-                infer_object.running_tsdf[valid] = (
-                    tsdf / denom + (old_count / denom) * infer_object.running_tsdf[valid]
+                session.infer.running_tsdf[valid] = (
+                    tsdf / denom + (old_count / denom) * session.infer.running_tsdf[valid]
                 )
 
         t1 = time.time()
         torch.cuda.synchronize()
-        log.per_view_time += t1 - t0
-        log.n_views += 1
-
-        return infer_object, log
+        session.log.per_view_time += t1 - t0
+        session.log.n_views += 1
 
     def predict_final(
-            self, 
-            batch, 
-            infer_object: ReconInferArray, 
-            log: ReconLog, 
-            task_id: str, 
-            out_path: str=None
-        ) -> Tuple[dict | Any, ReconInferArray, ReconLog]:
-        # final reconstruction: run point back-projection & 3d cnn
-
+        self, 
+        batch: Dict[str, torch.Tensor],
+        session: ReconSession,
+        device: torch.device,
+    ) -> Optional[dict | Any]:
         torch.cuda.synchronize()
-        log.final_step_time_0 = time.time()
+        session.log.final_step_time_0 = time.time()
 
-        global_feats = infer_object.M
+        global_feats = session.infer.M
         global_feats = self.fusion.bn(global_feats[None]).squeeze(0)
 
         if self.config.no_image_features:
@@ -450,16 +441,16 @@ class ReconPro(torch.nn.Module):
         if self.depth_guidance.enabled:
             if self.depth_guidance.density_fusion_channel:
                 global_feats = torch.cat(
-                    (global_feats, infer_object.running_density[None]), dim=0
+                    (global_feats, session.infer.running_density[None]), dim=0
                 )
             elif self.depth_guidance.tsdf_fusion_channel:
-                infer_object.running_tsdf.masked_fill_(infer_object.running_tsdf_weight == 0, 1)
+                session.infer.running_tsdf.masked_fill_(session.infer.running_tsdf_weight == 0, 1)
 
-                extra = infer_object.running_tsdf[None]
+                extra = session.infer.running_tsdf[None]
                 global_feats = torch.cat((global_feats, extra), dim=0)
 
-        global_feats = self.cnn3d(global_feats[None], infer_object.running_count[None] > 0)
-        global_valid = infer_object.running_count > 0
+        global_feats = self.cnn3d(global_feats[None], session.infer.running_count[None] > 0)
+        global_valid = session.infer.running_count > 0
 
         coarse_spatial_dims = np.array(global_feats.shape[2:])
         fine_spatial_dims = coarse_spatial_dims * self.config.output_sample_rate
@@ -491,14 +482,14 @@ class ReconPro(torch.nn.Module):
         coarse_voxel_chunk_size = (2**20) // (self.config.output_sample_rate**3)
 
         if self.config.point_backprojection:
-            imheight, imwidth = infer_object.images[0].shape[1:]
+            imheight, imwidth = session.infer.images[0].shape[1:]
             featheight = imheight // 4
             featwidth = imwidth // 4
 
             keyframe_chunk_size = 32
             highres_img_feats = torch.full(
                 (
-                    len(infer_object.images),
+                    len(session.infer.images),
                     self.cnn2d_pb_out_dim,
                     featheight,
                     featwidth,
@@ -510,25 +501,28 @@ class ReconPro(torch.nn.Module):
 
             for keyframe_chunk_start in tqdm.trange(
                 0,
-                len(infer_object.images),
+                len(session.infer.images),
                 keyframe_chunk_size,
                 desc="Highres image features",
                 leave=False,
             ):
                 keyframe_chunk_end = min(
                     keyframe_chunk_start + keyframe_chunk_size,
-                    len(infer_object.images),
+                    len(session.infer.images),
                 )
 
                 rgb_imgs = torch.stack(
-                    infer_object.images[keyframe_chunk_start:keyframe_chunk_end],
+                    session.infer.images[keyframe_chunk_start:keyframe_chunk_end],
                     dim=0,
-                )
+                ).to(device=device)
 
                 highres_img_feats[
                     keyframe_chunk_start:keyframe_chunk_end
                 ] = self.cnn2d_pb(rgb_imgs)
 
+                rgb_imgs.to(device="cpu")
+
+        # import pdb; pdb.set_trace()
         for coarse_voxel_chunk_start in tqdm.trange(
             0, n_coarse_vox_occ, coarse_voxel_chunk_size, leave=False, desc="Chunks"
         ):
@@ -560,11 +554,11 @@ class ReconPro(torch.nn.Module):
             )
 
             if self.config.point_backprojection:
-                img_feature_dim = infer_object.M.shape[0]
+                img_feature_dim = session.infer.M.shape[0]
                 fine_bp_feats = torch.zeros(
                     (self.cnn2d_pb_out_dim, len(chunk_fine_coords)),
                     device=self.config.device,
-                    dtype=infer_object.M.dtype,
+                    dtype=session.infer.M.dtype,
                 )
                 counts = torch.zeros(
                     len(chunk_fine_coords), device=self.config.device, dtype=torch.float32
@@ -591,11 +585,11 @@ class ReconPro(torch.nn.Module):
                         )
 
                 for keyframe_chunk_start in range(
-                    0, len(infer_object.images), keyframe_chunk_size
+                    0, len(session.infer.images), keyframe_chunk_size
                 ):
                     keyframe_chunk_end = min(
                         keyframe_chunk_start + keyframe_chunk_size,
-                        len(infer_object.images),
+                        len(session.infer.images),
                     )
 
                     chunk_highres_img_feats = highres_img_feats[
@@ -606,13 +600,13 @@ class ReconPro(torch.nn.Module):
                     )
 
                     poses = torch.stack(
-                        infer_object.poses[keyframe_chunk_start:keyframe_chunk_end],
+                        session.infer.poses[keyframe_chunk_start:keyframe_chunk_end],
                         dim=0,
                     )
 
                     if self.depth_guidance.enabled:
                         pred_depth_imgs = torch.stack(
-                            infer_object.depths[
+                            session.infer.depths[
                                 keyframe_chunk_start:keyframe_chunk_end
                             ],
                             dim=0,
@@ -740,12 +734,13 @@ class ReconPro(torch.nn.Module):
         fine_surface += 0.5
 
         torch.cuda.synchronize()
-        log.final_step_time_1 = time.time()
-        log.n_final_steps += 1
+        session.log.final_step_time_1 = time.time()
+        session.log.n_final_steps += 1
 
-        out_path = os.getcwd() if out_path is None else out_path
-        log_path = os.path.join(out_path, "logs/recon")
-        name = f"{time.time():.4f}_" + task_id + "_recon"
+        out_path = os.getcwd() if session.out_path is None else session.out_path
+        log_path = os.path.join(out_path, f"{session.user_id}/recon")
+        name = f"{time.time():.4f}_" + session.task_id + "_recon"
+        os.makedirs(log_path, exist_ok=True)
 
         origin = (
             batch["gt_origin"].cpu().numpy()[0]
@@ -763,37 +758,21 @@ class ReconPro(torch.nn.Module):
         except Exception as e:
             print(e)
         else:
-            glb_bytes = pred_mesh.export(os.path.join(log_path, f"{name}.glb"), file_type="glb")
-            return (glb_bytes, infer_object, log)
-
-    def predict_step(self, batch, batch_idx):
-        if batch["initial_frame"][0]:
-            self.predict_init(batch)
-
-        self.predict_per_view(batch)
-
-        if self.config.point_backprojection:
-            # store any frames that are marked as keyframes for later point back-projection
-            if batch["keyframe"][0]:
-                self.keyframe_rgb.append(batch["images"][0, 0])
-                self.keyframe_pose.append(batch["poses"][0])
-                if self.depth_guidance.enabled:
-                    self.keyframe_depth.append(batch["depths"][0, 0])
-
-        if batch["final_frame"][0]:
-            self.predict_final(batch)
+            return pred_mesh.export(
+                os.path.join(log_path, f"{name}.glb"), 
+                file_type="glb"
+            )
 
     # args, kwargs: unreferenced parameters
-    def on_predict_epoch_end(self, log: ReconLog, task_id: str, *args, **kwargs):
-        init_time = log.init_time_1 - log.init_time_0
+    def on_predict_epoch_end(self, session: ReconSession):
+        init_time = session.log.init_time_1 - session.log.init_time_0
 
-        per_init_time = init_time / log.n_inits
-        per_view_time = log.per_view_time / log.n_views
-        final_step_time = log.final_step_time / log.n_final_steps
-
-        logging.info(f"{task_id} - per_init_time: {per_init_time:.4f}")
-        logging.info(f"{task_id} - per_view_time: {per_view_time:.4f}")
-        logging.info(f"{task_id} - final_step_time: {final_step_time:.4f}")
+        per_init_time = init_time / session.log.n_inits
+        per_view_time = session.log.per_view_time / session.log.n_views
+        final_step_time = (session.log.final_step_time_1 - session.log.final_step_time_0) / session.log.n_final_steps
+        logging.info(f"{session.task_id} - per_init_time: {per_init_time:.4f}")
+        logging.info(f"{session.task_id} - per_view_time: {per_view_time:.4f}")
+        logging.info(f"{session.task_id} - final_step_time: {final_step_time:.4f}")
 
 
 class ReconPredictor:
@@ -811,53 +790,72 @@ class ReconPredictor:
     def init(self):
         self.predictor.to(self.config.device)
     
-    def infer(self, batch: Dict[str, torch.Tensor], task_id, log: ReconLog) -> Tuple[dict | Any, ReconLog]:
+    def infer(
+        self, 
+        batch: Dict[str, torch.Tensor], 
+        user_id: str,
+        task_id: str, 
+        log: ReconLog,
+        device: torch.device
+    ) -> Optional[Dict | Any]:
         if (not self._check_batch(batch)):
             raise ValueError("Input batch is missing required keys.")
 
         # 잘못된 batch를 수정
         batch = self._update_gt_if_invalid(batch)
 
-        infer_object = ReconInferArray()
-        infer_object, log = self.predictor.predict_init(batch, infer_object=infer_object, log=log)
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
-        batch_iterator = data.ReconIterator(batch)
+        session = ReconSession(
+            user_id=user_id,
+            task_id=task_id,
+            out_path=os.path.join(os.getcwd(), "logs/"),
+            infer=ReconInferArray(),
+            log=log
+        )
+
+        import pdb; pdb.set_trace()
+        self.predictor.predict_init(batch, session=session)
+
+        batch_iterator = data.ReconIterator(batch, enable_padding=True)
         batch_step: int = 1
         batch_length = batch_iterator.length // batch_step
-        
+        glb_bytes: Optional[Dict | Any] = None
+
         for frame_idx, frame in tqdm.tqdm(
             enumerate(batch_iterator), 
             total=batch_length, 
             desc="Extract image features"
         ):
-            infer_object, log = self.predictor.predict_per_view(frame, infer_object=infer_object, log=log)
+            frame = self._transfer_batch_to_device(frame, device)
+            self.predictor.predict_per_view(frame, session=session)
 
             if self.config.point_backprojection:
                 # store any frames that are marked as keyframes for later point back-projection
-                infer_object.images.append(frame["images"][0, 0])
-                infer_object.poses.append(frame["poses"][0])
+                session.infer.images.append(frame["images"][0, 0].cpu())
+                session.infer.poses.append(frame["poses"][0])
                 if self.predictor.depth_guidance.enabled:
-                    infer_object.depths.append(frame["depths"][0, 0])
+                    session.infer.depths.append(frame["depths"][0, 0])
 
-                infer_object.k_color.append(frame["k_image"])
-                infer_object.k_depth.append(frame["k_depth"])
+                session.infer.k_color.append(frame["k_image"].cpu())
+                session.infer.k_depth.append(frame["k_depth"].cpu())
 
             if (frame_idx == (batch_length) - 1):
                 logging.info(f"Start inference final step. task id: {task_id}")
-                temp_path = os.path.join(os.getcwd(), "Test/source/predictor")
-                glb_bytes, infer_object, log = self.predictor.predict_final(
+                glb_bytes = self.predictor.predict_final(
                     frame, 
-                    infer_object=infer_object, 
-                    log=log, 
-                    task_id=task_id, 
-                    out_path=temp_path
+                    session=session,
+                    device=device,
                 )
 
                 self.predictor.on_predict_epoch_end(
-                    infer_object=infer_object,
-                    task_id=task_id
+                    session=session
                 )
 
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        
         return glb_bytes
 
     def _check_batch(self, batch):
@@ -900,3 +898,14 @@ class ReconPredictor:
             
         else:
             return batch
+        
+    def _transfer_batch_to_device(
+        self, 
+        batch: Dict[str, torch.Tensor], 
+        device: torch.device
+    ) -> Dict[str, torch.Tensor]:
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                batch[key] = value.to(device)
+
+        return batch

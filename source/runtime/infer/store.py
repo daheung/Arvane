@@ -4,14 +4,15 @@ import logging
 import uuid as tid
 import uuid as uid
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple, Callable, TypeVar, Optional
 
 from source.runtime.container.array import ChunkArrayConcurrent
 from source.runtime.infer.defines import (
     InferenceStore, 
     EStoreOperatorType, 
     EStoreObjectType, 
-    ReconLog
+    ReconLog,
+    StoreStatus,
 )
 
 logging.basicConfig(
@@ -94,19 +95,27 @@ class InferenceChunkStoreConcurrent:
         if not self._check_task_id(task_id):
             raise KeyError(f"Cannot find task_id: current task id: {task_id}")
 
+        FIELD_MAP: dict[EStoreObjectType, Tuple[str, str]] = {
+            EStoreObjectType.USER_ID      : ("user_id",      "user_id"),
+            EStoreObjectType.TASK_ID      : ("task_id",      "task_id"),
+            EStoreObjectType.IMAGE        : ("image",        "image_container"),
+            EStoreObjectType.DEPTH        : ("depth",        "depth_container"),
+            EStoreObjectType.POSE         : ("pose",         "pose_container"),
+            EStoreObjectType.K_IMAGE      : ("k_image",      "k_image_container"),
+            EStoreObjectType.K_DEPTH      : ("k_depth",      "k_depth_container"),
+            EStoreObjectType.FOCAL_LENGTH : ("f_px",         "focal_length_container"),
+            EStoreObjectType.RECON_STORE  : ("recon_con",    "recon_container"),
+            EStoreObjectType.RECON_LOG    : ("recon_log",    "recon_log"),
+            EStoreObjectType.RECON_RESULT : ("recon_result", "recon_object"),
+            EStoreObjectType.RECON_STATUS : ("recon_status", "store_status"),
+        }
+
         store = self._items[task_id]
         ret_container = dict()
+        for flag, (key, attr_name) in FIELD_MAP.items():
+            if tsk_type & flag:
+                ret_container[key] = getattr(store, attr_name)
 
-        if tsk_type & EStoreObjectType.IMAGE  : ret_container["image"  ] = store.image_container
-        if tsk_type & EStoreObjectType.DEPTH  : ret_container["depth"  ] = store.depth_container
-        if tsk_type & EStoreObjectType.POSE   : ret_container["pose"   ] = store.pose_container
-        if tsk_type & EStoreObjectType.K_IMAGE: ret_container["k_image"] = store.k_image_container
-        if tsk_type & EStoreObjectType.K_DEPTH: ret_container["k_depth"] = store.k_depth_container
-        if tsk_type & EStoreObjectType.FOCAL_LENGTH: ret_container["f_px"     ] = store.focal_length_container
-        if tsk_type & EStoreObjectType.RECON_STORE : ret_container["recon_con"] = store.recon_container
-        if tsk_type & EStoreObjectType.RECON_LOG   : ret_container["recon_log"] = store.recon_logging
-        if tsk_type & EStoreObjectType.RECON_RESULT: ret_container["recon_result"] = store.recon_object
-        if tsk_type & EStoreObjectType.RECON_STATUS: ret_container["recon_status"] = store.store_status
         return ret_container
 
     def exists(self, task_id: str) -> bool:
