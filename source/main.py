@@ -41,23 +41,10 @@ async def launch_main_server_start_up(app: FastAPI) -> FastAPI:
     # from .utils import load_config
     # depth_config, recon_config = load_config()
 
-    logging.info("Loading Arvane Server Engine ...")
+    logging.info("Arvane Engine Version 1.0.0")
+    logging.info("Initializing Arvane Engine...")
     from .engine.arvane_engine import ArvaneEngine
     app.state.engine = ArvaneEngine()
-    
-    # depth_predictor = DepthPredictor(depth_config)
-    # depth_predictor.init()
-
-    # recon_predictor = ReconPredictor(recon_config)
-    # recon_predictor.init()
-
-    # # set app state dependencies
-    # app.state.depth_predictor = depth_predictor
-    # app.state.recon_predictor = recon_predictor
-
-    # # load container
-    # from .runtime.infer.store import InferenceChunkStoreConcurrent
-    # app.state.container = InferenceChunkStoreConcurrent(chunk_size=64)
 
     return app
 
