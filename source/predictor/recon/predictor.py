@@ -815,7 +815,7 @@ class ReconPredictor:
             log=log
         )
 
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         self.predictor.predict_init(batch, session=session)
 
         batch_iterator = data.ReconIterator(batch, enable_padding=True)
