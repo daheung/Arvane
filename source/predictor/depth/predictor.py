@@ -8,6 +8,7 @@ from typing import Mapping, Optional, Tuple, Union
 
 import os
 import sys
+import box
 import torch
 import logging
 import functools
@@ -306,7 +307,7 @@ class DepthPro(nn.Module):
         }
 
 class DepthPredictor:
-    def __init__(self, config):
+    def __init__(self, config: box.Box):
         predictor, transformer = create_model_and_transforms(config)
         predictor.eval()
 
@@ -317,10 +318,15 @@ class DepthPredictor:
     def init(self):
         self.predictor = self.predictor.to(device=self.config.device)
 
-    def infer(self, rgb_imgs: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
+    def infer(self, rgb_imgs: np.ndarray, f_px: Optional[Union[float, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
         rgb_imgs = self.transformer(rgb_imgs).to(self.config.device)
+        f_px = torch.tensor(f_px, dtype=torch.float32, device=self.config.device)
+
         with torch.no_grad():
-            output = self.predictor.infer(rgb_imgs)
+            output = self.predictor.infer(
+                rgb_imgs, 
+                f_px
+            )
 
         depth = output["depth"].cpu().squeeze()
         f_px = output["focallength_px"].cpu().squeeze()
