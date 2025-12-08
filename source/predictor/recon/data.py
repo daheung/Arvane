@@ -10,6 +10,7 @@ import torch
 import torchvision
 import trimesh
 
+from numpy.typing import NDArray
 from typing import Dict, Any, List, Tuple, Iterator
 from dataclasses import dataclass
 
@@ -81,16 +82,16 @@ def load_scan(scan, keyframes_file=None):
     K_color[1] *= TARGET_RGB_IMG_SIZE[0] / actual_rgb_img_height
 
     poses = np.load(scan["pose_npyfile"])
-    good_pose: np.ndarray = ~np.any(np.isinf(poses), axis=(1, 2))
+    good_pose: NDArray = ~np.any(np.isinf(poses), axis=(1, 2))
 
     frames = {i: {"pose": poses[i]} for i in range(len(poses))}
 
-    for i, f in enumerate(rgb_imgfiles):
-        # idx = int(f.replace("\\", "/").split("/")[-1][:-4])
+    for f in rgb_imgfiles:
+        i = int(f.split("/")[-1].split(".")[0])
         frames[i]["rgb_imgfile"] = f
 
-    for i, f in enumerate(gt_depth_imgfiles):
-        # i = int(f.replace("\\", "/").split("/")[-1][:-4])
+    for f in gt_depth_imgfiles:
+        i = int(f.split("/")[-1].split(".")[0])
         frames[i]["gt_depth_imgfile"] = f
 
     frames = {i: frame for i, frame in frames.items() if good_pose[i]}
@@ -98,7 +99,7 @@ def load_scan(scan, keyframes_file=None):
     if keyframes_file is not None:
         with open(keyframes_file, "r") as f:
             kf_idxs = np.array(json.load(f)[scan["scan_name"]])
-        frames = {i: frames[i] for i in kf_idxs if good_pose[i]}
+        frames = {i: frames[i] for i in kf_idxs}
 
     for idx, is_ok in enumerate(good_pose):
         if not is_ok:
@@ -297,8 +298,8 @@ def transfer_batch_to_device(batch, device):
         "crop_size_m",
         "gt_tsdf",
         "gt_occ",
-        "K_color",
-        "K_depth",
+        "k_image",
+        "k_depth",
         "images",
         "depths",
         "poses",
@@ -407,7 +408,7 @@ class InferenceDataset(torch.utils.data.Dataset):
         result = {
             "images": rgb_img,
             "poses": pose,
-            "K_color": K_color,
+            "k_image": K_color,
             "scan_name": scan_name,
             "gt_origin": gt_origin,
             "gt_maxbound": gt_maxbound,
@@ -419,7 +420,7 @@ class InferenceDataset(torch.utils.data.Dataset):
             pred_depth_img = load_depth_img(pred_depth_imgfile)[None]
 
             result["depths"] = pred_depth_img
-            result["K_depth"] = K_pred_depth
+            result["k_depth"] = K_pred_depth
 
         return result
 

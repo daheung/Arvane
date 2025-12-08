@@ -6,7 +6,7 @@ import numpy as np
 import skimage.measure
 import pytorch_lightning as pl
 
-from typing import Tuple
+from typing import Tuple, Optional
 from numpy.typing import NDArray
 from source.predictor.recon.tsdf_fusion import TSDFVolumeTorch
 
@@ -174,6 +174,7 @@ def tsdf_fusion(pred_depth_imgs, poses, K_pred_depth, input_coords, voxel_size):
     tsdf /= weight
     return tsdf, weight
 
+
 def estimate_volume_bounds_from_recon_datas(
     depths: NDArray,
     poses: NDArray,
@@ -183,7 +184,7 @@ def estimate_volume_bounds_from_recon_datas(
     margin = None,
     device = None,
     ret_tsdf = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
     margin = int(np.round(0.04 / voxel_size))
     _, _, imheight, imwidth = depths.shape
 

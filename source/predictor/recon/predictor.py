@@ -1,9 +1,11 @@
 import os
 import sys
+import box
 import time
 import tqdm
 import torch
 import logging
+import trimesh
 import numpy as np
 
 from typing import List, Any, Dict
@@ -520,9 +522,8 @@ class ReconPro(torch.nn.Module):
                     keyframe_chunk_start:keyframe_chunk_end
                 ] = self.cnn2d_pb(rgb_imgs)
 
-                rgb_imgs.to(device="cpu")
+                rgb_imgs = rgb_imgs.to(device="cpu")
 
-        # import pdb; pdb.set_trace()
         for coarse_voxel_chunk_start in tqdm.trange(
             0, n_coarse_vox_occ, coarse_voxel_chunk_size, leave=False, desc="Chunks"
         ):
@@ -755,13 +756,83 @@ class ReconPro(torch.nn.Module):
                 origin=origin,
                 level=0.5,
             )
+
+            # K = session.infer.k_color[0]
+            # V = pred_mesh.vertices.shape[0]
+            # verts_world = np.hstack([
+            #     pred_mesh.vertices.astype(np.float32),
+            #     np.ones((V, 1), dtype=np.float32)
+            # ])
+
+            # color_accum = np.zeros((V, 3), dtype=np.float64)
+            # weight_accum = np.zeros((V,), dtype=np.float64)
+            
+            # for image_idx in range(len(session.infer.images)):
+            #     T_cw = poses[image_idx]
+            #     img = session.infer.images[image_idx]
+
+            #     verts_cam = (T_cw @ verts_world.T).T
+            #     xc = verts_cam[:, 0]
+            #     zc = verts_cam[:, 2]
+            #     yc = verts_cam[:, 1]
+
+            #     valid = zc > 0
+            #     if not np.any(valid):
+            #         continue
+
+            #     idx_valid = np.where(valid)[0]
+
+            #     x_valid = xc[idx_valid]
+            #     y_valid = yc[idx_valid]
+            #     z_valid = zc[idx_valid]
+
+            #     x_norm = x_valid / z_valid
+            #     y_norm = y_valid / z_valid
+
+            #     uv_h = (K @ np.vstack([x_norm, y_norm, np.ones_like(x_norm)])).T  # (N_valid, 3)
+            #     u = uv_h[:, 0] / uv_h[:, 2]
+            #     v = uv_h[:, 1] / uv_h[:, 2]
+
+            #     in_img = (u >= 0) & (u < imwidth - 1) & (v >= 0) & (v < imheight - 1)
+            #     if not np.any(in_img):
+            #         continue
+                
+            #     idx_final = idx_valid[in_img]
+            #     u_sel = u[in_img]
+            #     v_sel = v[in_img]
+
+            #     u_int = np.round(u_sel).astype(int)
+            #     v_int = np.round(v_sel).astype(int)
+
+            #     sampled_colors = img[v_int, u_int, :].astype(np.float64) / 255.0  # [0,1]
+            #     w = np.ones_like(u_int, dtype=np.float64)  # 지금은 uniform weight
+
+            #     color_accum[idx_final] += sampled_colors * w[:, None]
+            #     weight_accum[idx_final] += w
+
+            # default_color = np.asarray(default_color, dtype=np.float32)
+            # if default_color.shape != (3,):
+            #     raise ValueError("default_color must be a sequence of length 3 (r,g,b).")
+
+            # vertex_colors = np.zeros((V, 3), dtype=np.float32)
+            # valid_color = weight_accum > 0
+
+            # vertex_colors[valid_color] = (color_accum[valid_color] /
+            #                               weight_accum[valid_color, None]).astype(np.float32)
+
+            # vertex_colors[~valid_color] = default_color
+
+            # pred_mesh.visual.vertex_colors = (vertex_colors * 255.0).clip(0, 255).astype(np.uint8)
+
         except Exception as e:
             print(e)
         else:
-            return pred_mesh.export(
+            pred_mesh.export(
                 os.path.join(log_path, f"{name}.glb"), 
                 file_type="glb"
             )
+
+            return pred_mesh.export(file_type="dict")
 
     # args, kwargs: unreferenced parameters
     def on_predict_epoch_end(self, session: ReconSession):
@@ -776,7 +847,7 @@ class ReconPro(torch.nn.Module):
 
 
 class ReconPredictor:
-    def __init__(self, config):
+    def __init__(self, config: box.Box):
         self.config = config
         
         checkpoint_uri = os.path.join(os.getcwd(), config.checkpoints)
@@ -798,6 +869,7 @@ class ReconPredictor:
         log: ReconLog,
         device: torch.device
     ) -> Optional[Dict | Any]:
+        # import pdb; pdb.set_trace()
         if (not self._check_batch(batch)):
             raise ValueError("Input batch is missing required keys.")
 
@@ -815,7 +887,6 @@ class ReconPredictor:
             log=log
         )
 
-        # import pdb; pdb.set_trace()
         self.predictor.predict_init(batch, session=session)
 
         batch_iterator = data.ReconIterator(batch, enable_padding=True)
@@ -823,6 +894,7 @@ class ReconPredictor:
         batch_length = batch_iterator.length // batch_step
         glb_bytes: Optional[Dict | Any] = None
 
+        # import pdb; pdb.set_trace()
         for frame_idx, frame in tqdm.tqdm(
             enumerate(batch_iterator), 
             total=batch_length, 
@@ -842,6 +914,7 @@ class ReconPredictor:
                 session.infer.k_depth.append(frame["k_depth"].cpu())
 
             if (frame_idx == (batch_length) - 1):
+                # import pdb; pdb.set_trace()
                 logging.info(f"Start inference final step. task id: {task_id}")
                 glb_bytes = self.predictor.predict_final(
                     frame, 
