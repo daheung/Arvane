@@ -108,6 +108,7 @@ class InferenceChunkStoreConcurrent:
             EStoreObjectType.RECON_LOG    : ("recon_log",    "recon_log"),
             EStoreObjectType.RECON_RESULT : ("recon_result", "recon_object"),
             EStoreObjectType.RECON_STATUS : ("recon_status", "store_status"),
+            EStoreObjectType.EXTRACTION_OBJECT : ("extraction_object", "extraction_object"),
         }
 
         store = self._items[task_id]
