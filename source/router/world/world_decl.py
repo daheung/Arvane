@@ -3,8 +3,8 @@ from typing import Optional, List
 from dataclasses import dataclass
 
 class WorldCreatePayload(BaseModel):
-    user_id: Optional[str] = None
-    name: str
+    user_id: str
+    name: Optional[str] = None
 
 class WorldDeletePayload(BaseModel):
     name: Optional[str] = None
@@ -29,9 +29,10 @@ class WorldUpdatePayload(BaseModel):
     color: WorldUpdatePayloadColor
     k_color: List[float]
     pose: List[float]
-    gt_origin: List[float]
-    gt_maxbound: List[float]
+    gt_origin: Optional[List[float]] = None
+    gt_maxbound: Optional[List[float]] = None
 
+    timestamp: int
     auto_update_depth: Optional[bool] = False
 
 class WorldStartPayload(BaseModel):

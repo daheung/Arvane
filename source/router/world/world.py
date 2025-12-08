@@ -23,7 +23,7 @@ from .world_decl import (
     verify_world_update
 )
 
-from source.router.utils.utils import NDArrayB64
+from source.predictor.utils import o3d_meshes_to_glb_bytes
 from source.runtime.infer.defines import ReconLog
 from source.runtime.infer.store import (
     EStoreObjectType,
@@ -122,11 +122,19 @@ async def world_update(
     payload: WorldUpdatePayload,
     arvane_engine: ArvaneEngine = Depends(get_arvane_engine),
 ):
+    # import pdb; pdb.set_trace()
     try:
+        task_id = payload.task_id
+        if (not arvane_engine.container.exists(task_id)):
+            logging.warning(f"Cannot find task_id: {task_id}, create new task_id before get world status.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cannot find task_id, create new task_id before get world status."
+            )
+    
         # check payload validity. if invalid, raise ValueError
         verify_world_update(payload)
         
-        task_id = payload.task_id
         buffer_b64 = payload.color.buffer_b64
         if payload.color.data_url:
             _, buffer_b64 = buffer_b64.split(",", 1)
@@ -134,6 +142,7 @@ async def world_update(
         color = base64.b64decode(buffer_b64)
         color = Image.open(io.BytesIO(color)).convert("RGB")
         color = np.array(color).transpose((2, 0, 1))
+        color = np.array(color)
 
         k_color: NDArray = np.array(payload.k_color, dtype=np.float32).reshape((3, 3))
         pose   : NDArray = np.array(payload.pose   , dtype=np.float32).reshape((4, 4))
@@ -320,16 +329,13 @@ async def world_result(
                 detail="Cannot find task_id, create new task_id before get world status."
             )
 
-        result = arvane_engine.container.load_object_by_task_id(
-            task_id=task_id,
-            tsk_type=EStoreObjectType.RECON_RESULT | EStoreObjectType.RECON_STATUS
-        )
+        result = arvane_engine.container[task_id]
+        glb_bytes = o3d_meshes_to_glb_bytes(result.extraction_object)
 
-        glb_bytes = result['recon_result']
         if (glb_bytes is None):
             return JSONResponse(
                 content={ 
-                    "status": f'inference {str(result["recon_status"])}.',
+                    "status": f'inference {str(result.store_status)}.',
                 }, 
                 status_code=status.HTTP_202_ACCEPTED 
             )
@@ -338,7 +344,7 @@ async def world_result(
             content=glb_bytes,
             media_type="model/gltf-binary",
             headers={
-                "Content-Disposition": 'inline; filename="generated.glb"'
+                "Content-Disposition": f'inline; filename="{task_id}.glb"'
             }
         )
 
