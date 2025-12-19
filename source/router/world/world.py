@@ -146,6 +146,14 @@ async def world_update(
 
         k_color: NDArray = np.array(payload.k_color, dtype=np.float32).reshape((3, 3))
         pose   : NDArray = np.array(payload.pose   , dtype=np.float32).reshape((4, 4))
+        # if (payload.r_hand_coordinate):
+        #     R_world = np.array([[1, 0, 0, 0], 
+        #                         [0, 0, -1, 0], 
+        #                         [0, 1, 0, 0], 
+        #                         [0, 0, 0, 1]], dtype=np.float32)
+
+        #     S_cam = np.diag([1, -1, -1, 1]).astype(np.float32)
+        #     pose = R_world @ pose @ S_cam
 
         arvane_engine.container.update_object_by_task_id(
             task_id,
@@ -156,7 +164,7 @@ async def world_update(
                 'pose': (pose, )
             },
             tsk_type=EStoreObjectType.RECON_INFER_NO_DEPTH,
-            op_type=EStoreOperatorType.INSERT
+            timestamp=payload.timestamp
         )
 
         if (payload.auto_update_depth):

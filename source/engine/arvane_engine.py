@@ -183,9 +183,11 @@ class ArvaneEngine:
             logging.warning(f"Task was aborted. Cannot find task_id: {task_id}, create new task_id before infer depth.")
             return TaskStatus.ABORTED
         
-        store = self.container.load_object_by_task_id(task_id, EStoreObjectType.IMAGE | EStoreObjectType.DEPTH)
-        image_container: Optional[ChunkArrayConcurrent] = store["image"]
-        depth_container: Optional[ChunkArrayConcurrent] = store["depth"]
+        store = self.container[task_id]
+
+        image_container  : Optional[ChunkArrayConcurrent] = store.image_container
+        k_image_container: Optional[ChunkArrayConcurrent] = store.k_image_container
+        depth_container  : Optional[ChunkArrayConcurrent] = store.depth_container
 
         assert depth_container is not None, "Depth container is None, but must be initialized already."
 
@@ -203,11 +205,18 @@ class ArvaneEngine:
         if (num_depth >= num_image):
             logging.info(f"Depth data already exists. Skip depth inference for task_id: {task_id}")
             return TaskStatus.NOT_MODIFIED
+        
 
         offset_start = num_image - num_image
         for idx in tqdm(range(offset_start, num_image)):
-            depth, f_px = self._inference_depth_and_f_px_impl(image_container[idx].object)
+            k_color: NDArray = k_image_container[idx].object
+            fx, fy = k_color[0, 0], k_color[1, 1]
+            depth, f_px = self._inference_depth_and_f_px_impl(
+                image_container[idx].object,
+                (fx + fy) / 2
+            )
 
+            timestamp = store.image_container[idx].key
             self.container.update_object_by_task_id(
                 task_id=task_id,
                 objects={
@@ -215,7 +224,7 @@ class ArvaneEngine:
                     'f_px': (f_px, )
                 },
                 tsk_type=EStoreObjectType.FOCAL_LENGTH | EStoreObjectType.DEPTH,
-                op_type=EStoreOperatorType.INSERT
+                timestamp=timestamp
             )
 
         return TaskStatus.SUCCESS
@@ -249,10 +258,18 @@ class ArvaneEngine:
 
         return self._update_objects_by_task_id(task_id, update_objects)
     
-    def inference_depth_and_f_px(self, image: NDArray[np.uint8]) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
-        return self._inference_depth_and_f_px_impl(image)
+    def inference_depth_and_f_px(
+        self, 
+        image: NDArray[np.uint8],
+        f_px: NDArray[np.float32]
+    ) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
+        return self._inference_depth_and_f_px_impl(image, f_px)
 
-    def _inference_depth_and_f_px_impl(self, image: NDArray[np.uint8]) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
+    def _inference_depth_and_f_px_impl(
+        self, 
+        image: NDArray[np.uint8],
+        f_px: NDArray[np.float32]
+    ) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
         # Pytorch (C, H, W) -> OpenCV (H, W, C)
         # 이미지를 모델에 넣을 수 있는 크기로 전처리 [width: 640, height: 480]
         image = cv2.resize(
@@ -261,7 +278,7 @@ class ArvaneEngine:
             interpolation=cv2.INTER_AREA
         )
 
-        depth, f_px = self.depth_predictor.infer(image)
+        depth, f_px = self.depth_predictor.infer(image, f_px)
         return (
             depth.to('cpu', dtype=torch.float32).numpy(), 
             f_px .to('cpu', dtype=torch.float32).numpy()

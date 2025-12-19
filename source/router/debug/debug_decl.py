@@ -7,4 +7,5 @@ class DepthUpdatePayloadDepth:
 
 class DepthUpdatePayload(BaseModel):
     task_id: str
+    timestamp: float
     depth: DepthUpdatePayloadDepth

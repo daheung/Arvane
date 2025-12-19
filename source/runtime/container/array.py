@@ -4,7 +4,7 @@ import logging
 import threading
 
 from dataclasses import dataclass
-from typing import Any, List, Sequence, Callable, Generic, TypeVar
+from typing import Any, List, Sequence, Callable, Generic, TypeVar, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,7 +20,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class FixedChunkObject(Generic[T]):
-    ts_sec: float
+    key: Optional[float]
     object: T
 
 class FixedChunkArray(Generic[T]):
@@ -49,18 +49,18 @@ class FixedChunkArray(Generic[T]):
         with self._items_lock:
             return len(self._items)
 
-    def add_object(self, object: T) -> int:
+    def add_object(self, object: T, key: Optional[float] = None) -> int:
         assert not (self._is_full())
 
         with self._items_lock:
-            entry = FixedChunkObject(ts_sec=time.time(),
+            entry = FixedChunkObject(key=key,
                                object=object)
             self._items.append(entry)
         
         return self.num_item - 1
 
     
-    def add_objects(self, objects: Sequence[T]) -> int:
+    def add_objects(self, objects: Sequence[T], keys: Optional[Sequence[float]] = None) -> int:
         """
         여러 객체를 한꺼번에 추가합니다. 기본적으로 다음에 넣어야할 배열의 인덱스가 반환됩니다.
         추가 후 배열이 다 차서 다음에 추가로 넣을 공간이 없다면 -1을 반환합니다.
@@ -69,16 +69,39 @@ class FixedChunkArray(Generic[T]):
         assert len(objects) + len(self._items) <= self._chunk_size
 
         with self._items_lock:
-            for object in objects:
-                entry = FixedChunkObject(ts_sec=time.time(),
+            for idx, object in enumerate(objects):
+                assert idx < len(keys) if keys is not None else True
+                key = keys[idx] if keys is not None else None
+                entry = FixedChunkObject(key=key,
                                    object=object)
+                
                 self._items.append(entry)
         
         if (self._is_full()):
             return -1
         
         return self.num_item
-    
+
+    def _insert_considering_chunk(self, idx: int, object: T, key: Optional[float] = None) -> Optional[FixedChunkObject[T]]:
+            """
+            지정된 인덱스에 요소를 삽입합니다.
+            - 공간이 있으면: 그냥 삽입하고 None 반환
+            - 꽉 찼으면: 삽입 후 가장 마지막 요소를 제거(pop)하여 반환 (오버플로우 처리)
+            """
+            with self._items_lock:
+                # 인덱스 보정 (append 처리를 위해)
+                insert_idx = min(idx, len(self._items))
+                
+                entry = FixedChunkObject(key=key, object=object)
+                self._items.insert(insert_idx, entry)
+                
+                overflow = None
+                if len(self._items) > self._chunk_size:
+                    # 꽉 찼으므로 마지막 요소를 뺌
+                    overflow = self._items.pop()
+                    
+                return overflow
+        
     def delete_object(self, predicate: Callable[[FixedChunkObject, int], bool]) -> int:
         return self._delete_object_by_predicate(predicate=predicate)
     
@@ -163,18 +186,18 @@ class ChunkArrayConcurrent(Generic[T]):
             return self._chunks[chunk_idx]
 
     # ---- 배열 API ----
-    def add_object(self, object: T) -> int:
+    def add_object(self, object: T, key: Optional[float] = None) -> int:
         """
         새 객체를 마지막 청크에 추가. 가득 차 있으면 새 청크를 생성.
         """
         chunk = self._ensure_chunk_exists_for_append()
         # 청크 자체가 락을 관리하므로 여기서는 청크 레벨만 사용
-        offset = chunk.add_object(object)
+        offset = chunk.add_object(object, key=key)
         chunk_idx = len(self._chunks) - 1
 
         return (chunk_idx * self.chunk_size) + offset
-    
-    def add_objects(self, objects: Sequence[T]) -> int:
+
+    def add_objects(self, objects: Sequence[T], keys: Optional[Sequence[float]] = None) -> int:
         objects_len = len(objects)
         object_offset = 0  # 전역 진행 포인터
 
@@ -198,7 +221,8 @@ class ChunkArrayConcurrent(Generic[T]):
             batch = objects[object_offset : object_offset + to_add]
 
             # add_objects의 반환 값은 "오프셋"입니다.
-            chunk_offset = chunk.add_objects(batch)
+            keys = keys[object_offset : object_offset + to_add] if keys is not None else None
+            chunk_offset = chunk.add_objects(batch, keys=keys)
             object_offset += to_add
 
             # 혹시 아무 것도 못 넣었다면(비정상) 무한루프 방지
@@ -219,7 +243,7 @@ class ChunkArrayConcurrent(Generic[T]):
 
         return chunk[offset]
 
-    def set(self, idx: int, new_object: T) -> FixedChunkObject[T]:
+    def set(self, idx: int, new_object: T, new_key: Optional[float] = None) -> FixedChunkObject[T]:
         """
         전역 인덱스의 항목을 새 object로 교체.
         FixedChunkArray에 set API가 없으므로, 안전하게 락을 잡고 내부 리스트를 교체합니다.
@@ -233,7 +257,7 @@ class ChunkArrayConcurrent(Generic[T]):
                 raise IndexError("index out of range")
             old = chunk._items[offset]
             updated = FixedChunkObject[T](
-                ts_sec=time.time(),
+                key=new_key,
                 object=new_object
             )
             chunk._items[offset] = updated
@@ -280,12 +304,12 @@ class ChunkArrayConcurrent(Generic[T]):
                 for j in range(offset, upper):
                     item = chunk._items[j]
                     out.append(
-                        FixedChunkObject[T](ts_sec=item.ts_sec, object=item.object)
+                        FixedChunkObject[T](key=item.key, object=item.object)
                     )
             cur += take
         return out
 
-    def set_objects(self, start: int, values: Sequence[T]) -> None:
+    def set_objects(self, start: int, values: Sequence[T], keys: Optional[Sequence[float]] = None) -> None:
         """
         [start, start+len(values)) 범위에 대해 값들을 교체(쓰기).
         범위가 여러 청크에 걸쳐도 청크별로 잠그고 교체합니다.
@@ -307,9 +331,69 @@ class ChunkArrayConcurrent(Generic[T]):
                 upper = min(offset + take, len(ch._items))
                 span = upper - offset
                 for j in range(span):
+                    assert k + j < len(keys) if keys is not None else True
+                    key = keys[k + j] if keys is not None else None
                     ch._items[offset + j] = FixedChunkObject[T](
-                        ts_sec=time.time(),
+                        key=key,
                         object=values[k + j]
                     )
             cur += take
             k += take
+
+    def insert(self, idx: int, object: T, key: Optional[float] = None) -> None:
+            """
+            특정 위치(idx)에 객체를 삽입합니다.
+            해당 위치의 청크부터 뒤쪽 청크들로 데이터가 하나씩 밀려나는(Shift) 비용이 발생합니다.
+            """
+            # 구조적 변경(새 청크 추가 가능성)이 있으므로 chunks_lock을 잡습니다.
+            with self._chunks_lock:
+                total_len = 0
+                for ch in self._chunks:
+                    total_len += len(ch)
+                
+                if idx < 0:
+                    raise IndexError("index cannot be negative")
+                if idx > total_len:
+                    raise IndexError("index out of range")
+    
+                # 1. 삽입 시작 위치 계산
+                start_chunk_idx = idx // self._chunk_size
+                start_offset = idx % self._chunk_size
+                
+                # 만약 맨 뒤에 추가하는 경우(append와 동일)이고, 
+                # 계산된 chunk_idx가 현재 청크 개수와 같다면(새 청크 필요) 처리
+                if start_chunk_idx >= len(self._chunks):
+                    # 마지막 청크가 꽉 차서 다음 청크 인덱스를 가리키거나, 배열이 비어있는 경우
+                    new_chunk = FixedChunkArray(self._chunk_size)
+                    new_chunk.add_object(object, key=key)
+                    self._chunks.append(new_chunk)
+                    return
+    
+                # 2. Ripple Shift (도미노 이동)
+                # 현재 청크에 삽입 -> 넘치는 것을 다음 청크의 맨 앞에 삽입 -> 반복
+                current_obj_to_insert = object
+                
+                # 시작 청크부터 마지막 청크까지 순회
+                for i in range(start_chunk_idx, len(self._chunks)):
+                    chunk = self._chunks[i]
+                    
+                    # 첫 번째(타겟) 청크는 계산된 offset에 넣고,
+                    # 그 이후 청크들은 앞쪽에서 밀려온 것이므로 0번 인덱스에 넣습니다.
+                    local_insert_idx = start_offset if i == start_chunk_idx else 0
+                    
+                    # 삽입 시도 및 오버플로우(밀려난 녀석) 획득
+                    overflow_obj: FixedChunkObject[T] = chunk._insert_considering_chunk(local_insert_idx, current_obj_to_insert, key=key)
+                    
+                    if overflow_obj is None:
+                        # 청크에 빈 공간이 있어서 밀려난 게 없음 -> 연쇄 이동 종료
+                        return
+                    else:
+                        # 밀려난 요소를 다음 청크의 입력으로 설정
+                        current_obj_to_insert = overflow_obj.object
+                        current_obj_to_key = overflow_obj.key
+    
+                # 3. 마지막 청크까지 처리했는데도 남은 요소(overflow)가 있다면 새 청크 생성
+                # (위 루프가 끝났다는 건 마지막 청크에서도 하나가 튕겨져 나왔다는 뜻)
+                new_chunk = FixedChunkArray(self._chunk_size)
+                new_chunk.add_object(current_obj_to_insert, key=current_obj_to_key)
+                self._chunks.append(new_chunk)

@@ -84,7 +84,8 @@ async def depth(
         objects={
             'depth': (depth, )
         },
-        tsk_type=EStoreObjectType.DEPTH
+        tsk_type=EStoreObjectType.DEPTH,
+        timestamp=payload.timestamp
     )
 
     return JSONResponse({ "result": "ok" }, status_code=status.HTTP_200_OK)
@@ -198,7 +199,7 @@ async def debug_start_predict_depths(
         )[-1]
 
         logging.info("Preparing predictor dataset and dataloader.")
-        dataset = InferenceDataset(scans=test_scans, load_depth=True)
+        dataset = InferenceDataset(scans=test_scans, load_depth=True, is_pred_depth=False)
         dataset_length = len(dataset)
 
         worker_predict = 1
@@ -207,6 +208,7 @@ async def debug_start_predict_depths(
             batch_size=dataset_length,
             num_workers=worker_predict,
             persistent_workers=True,
+            pin_memory=False,
             shuffle=False
         )
         
@@ -268,7 +270,7 @@ async def debug_start_reconstruction(
         )[-1]
 
         logging.info("Preparing predictor dataset and dataloader.")
-        dataset = InferenceDataset(scans=test_scans, load_depth=True)
+        dataset = InferenceDataset(scans=test_scans, load_depth=True, is_pred_depth=True)
         dataset_length = len(dataset)
 
         worker_predict = 1
@@ -277,6 +279,7 @@ async def debug_start_reconstruction(
             batch_size=dataset_length,
             num_workers=worker_predict,
             persistent_workers=True,
+            pin_memory=False,
             shuffle=False
         )
 

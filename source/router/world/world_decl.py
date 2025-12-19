@@ -34,7 +34,8 @@ class WorldUpdatePayload(BaseModel):
 
     timestamp: int
     auto_update_depth: Optional[bool] = False
-
+    r_hand_coordinate: Optional[bool] = False
+    
 class WorldStartPayload(BaseModel):
     name: Optional[str] = None
     task_id: str

@@ -65,8 +65,8 @@ class InferenceChunkStoreConcurrent:
         self, 
         task_id: str, 
         objects: Dict[str, tuple[Any]], 
-        tsk_type: EStoreObjectType, 
-        op_type: EStoreOperatorType=EStoreOperatorType.INSERT
+        timestamp: Optional[float],
+        tsk_type: EStoreObjectType,
     ) -> int:
         if not self._check_task_id(task_id):
             raise KeyError(f"Cannot find task_id: current task id: {task_id}")
@@ -82,12 +82,19 @@ class InferenceChunkStoreConcurrent:
             raise ValueError(f"Cannot update object with different length: current task id: {task_id}, object keys: {keys}, object lengths: {object_len_per_keys}")
 
         store = self._items[task_id]
-        if tsk_type & EStoreObjectType.DEPTH       : store.depth_container       .add_objects(objects.get("depth"  , None))
-        if tsk_type & EStoreObjectType.POSE        : store.pose_container        .add_objects(objects.get("pose"   , None))
-        if tsk_type & EStoreObjectType.IMAGE       : store.image_container       .add_objects(objects.get("image"  , None))
-        if tsk_type & EStoreObjectType.K_IMAGE     : store.k_image_container     .add_objects(objects.get("k_image", None))
-        if tsk_type & EStoreObjectType.K_DEPTH     : store.k_depth_container     .add_objects(objects.get("k_depth", None))
-        if tsk_type & EStoreObjectType.FOCAL_LENGTH: store.focal_length_container.add_objects(objects.get("f_px"   , None))
+        depths   = objects.get("depth"  , None)
+        poses    = objects.get("pose"   , None)
+        images   = objects.get("image"  , None)
+        k_images = objects.get("k_image", None)
+        k_depths = objects.get("k_depth", None)
+        f_px     = objects.get("f_px"   , None)
+
+        if tsk_type & EStoreObjectType.DEPTH       : store.depth_container       .add_objects(depths  , [timestamp for _ in range(len(depths  ))] if timestamp is not None else None)
+        if tsk_type & EStoreObjectType.POSE        : store.pose_container        .add_objects(poses   , [timestamp for _ in range(len(poses   ))] if timestamp is not None else None)
+        if tsk_type & EStoreObjectType.IMAGE       : store.image_container       .add_objects(images  , [timestamp for _ in range(len(images  ))] if timestamp is not None else None)
+        if tsk_type & EStoreObjectType.K_IMAGE     : store.k_image_container     .add_objects(k_images, [timestamp for _ in range(len(k_images))] if timestamp is not None else None)
+        if tsk_type & EStoreObjectType.K_DEPTH     : store.k_depth_container     .add_objects(k_depths, [timestamp for _ in range(len(k_depths))] if timestamp is not None else None)
+        if tsk_type & EStoreObjectType.FOCAL_LENGTH: store.focal_length_container.add_objects(f_px    , [timestamp for _ in range(len(f_px    ))] if timestamp is not None else None)
 
         return 1
 
