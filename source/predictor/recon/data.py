@@ -241,8 +241,23 @@ def augment_images_inplace(rgb_imgs):
         rgb_imgs[i] = torchvision.transforms.functional.adjust_hue(rgb_imgs[i], hue)
 
 
-def load_depth_img(f):
-    return cv2.imread(f, cv2.IMREAD_ANYDEPTH).astype(np.float32) / 1000
+def load_depth_img(f, pred_depth=None, target_size=None):
+    if pred_depth:
+        depth = np.load(f)["depth"].astype(np.float32)
+    else:
+        depth = cv2.imread(f, cv2.IMREAD_ANYDEPTH).astype(np.float32) / 1000.0
+
+    if target_size is not None:
+        tgt_h, tgt_w = target_size
+        h, w = depth.shape
+        if (h, w) != (tgt_h, tgt_w):
+            depth = cv2.resize(
+                depth,
+                (tgt_w, tgt_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+    return depth
 
 
 def load_depth_imgs(depth_imgfiles, imsize):
@@ -327,9 +342,10 @@ def transfer_batch_to_device(batch, device):
     return transfer_batch
 
 class InferenceDataset(torch.utils.data.Dataset):
-    def __init__(self, scans, load_depth=False, keyframes_file=None):
+    def __init__(self, scans, load_depth=False, is_pred_depth=None, keyframes_file=None):
         self.scans = scans
         self.load_depth = load_depth
+        self.is_pred_depth = is_pred_depth
 
         self.frames = []
         for scan in self.scans:
@@ -349,10 +365,12 @@ class InferenceDataset(torch.utils.data.Dataset):
                 keyframe = kf_idx[i]
 
                 if load_depth:
+                    rel_depth_dir = "pred_depth" if is_pred_depth else "depth"
+                    file_extension = ".npz" if is_pred_depth else ".png"
                     pred_depth_imgfile = os.path.join(
                         scan["pred_depth_dir"],
-                        "depth",
-                        os.path.basename(rgb_imgfiles[i])[:-4] + ".png",
+                        rel_depth_dir,
+                        os.path.basename(rgb_imgfiles[i])[:-4] + file_extension,
                     )
                     K_pred_depth = torch.from_numpy(
                         np.loadtxt(
@@ -417,7 +435,7 @@ class InferenceDataset(torch.utils.data.Dataset):
             "final_frame": final_frame,
         }
         if self.load_depth:
-            pred_depth_img = load_depth_img(pred_depth_imgfile)[None]
+            pred_depth_img = load_depth_img(pred_depth_imgfile, self.is_pred_depth, (640, 480))[None]
 
             result["depths"] = pred_depth_img
             result["k_depth"] = K_pred_depth

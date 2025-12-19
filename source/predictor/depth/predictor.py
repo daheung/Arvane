@@ -317,7 +317,8 @@ class DepthPredictor:
         
     def init(self):
         self.predictor = self.predictor.to(device=self.config.device)
-
+    
+    @torch.no_grad()
     def infer(self, rgb_imgs: np.ndarray, f_px: Optional[Union[float, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
         rgb_imgs = self.transformer(rgb_imgs).to(self.config.device)
         f_px = torch.tensor(f_px, dtype=torch.float32, device=self.config.device)

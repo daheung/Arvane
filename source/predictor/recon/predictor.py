@@ -861,6 +861,7 @@ class ReconPredictor:
     def init(self):
         self.predictor.to(self.config.device)
     
+    @torch.no_grad()
     def infer(
         self, 
         batch: Dict[str, torch.Tensor], 
