@@ -74,6 +74,8 @@ recon_device_descriptor: DeviceDescriptor = self.device_manager.get_device_consi
 
 ## 2. Quick Start
 
+아직 해당 설정은 predictor에 대한 checkpoint를 적용하고 있지 않기 때문에 실행하면 문제가 발생할 수 있습니다.
+
 ### 2.1 Create virtual environment
 
 ```bash
