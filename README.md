@@ -748,7 +748,7 @@ World update API를 통해 frame을 계속 누적하면 CPU memory, GPU memory �
 
 Arvane은 depth estimation 서버이면서 동시에 pose-aware reconstruction 서버이므로, 입력 pose의 정확도는 최종 품질에 직접적인 영향을 줍니다. 
 
-해당 문제는 현재 연구 중에 있습니다.
+해당 문제는 현재 연구 중에 있습니다. <a href="https://drive.google.com/file/d/1yt9mYvBrJTFX2L_z7tu9P4ygGSuIiBM_/view?usp=drive_link" style="text-decoration: none;">관련 제안서를 보려면 해당 사이트를 참고하세요</a>
 
 ---
 
@@ -1205,49 +1205,6 @@ TSDF 정상 / GLB 오류
 ```
 
 좌표계, 단위 및 최적화 문제는 서로 유사한 증상을 만들 수 있으므로 여러 항목을 동시에 수정하지 않는 것이 중요합니다. 한 번에 하나의 조건만 변경하고 reference output과 비교하십시오.
-
----
-
-## 12. Development Notes
-
-### Run directly
-
-```bash
-dotenv --file .env run -- python -m source.main
-```
-
-### Check GPU state
-
-```bash
-nvidia-smi
-```
-
-### Check CUDA from PyTorch
-
-```bash
-python - <<'PY'
-import torch
-
-print("PyTorch:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-print("CUDA runtime:", torch.version.cuda)
-print("GPU count:", torch.cuda.device_count())
-
-for index in range(torch.cuda.device_count()):
-    properties = torch.cuda.get_device_properties(index)
-    print(
-        index,
-        properties.name,
-        f"{properties.total_memory / 1024**3:.2f} GiB",
-    )
-PY
-```
-
-### Start with development mode
-
-```bash
-MODE=development python -m source.main
-```
 
 ---
 
