@@ -14,6 +14,9 @@ import logging
 import functools
 import numpy as np
 
+from torchao.quantization import quantize_, Int8WeightOnlyConfig, PerRow
+from torchao.utils import get_model_size_in_bytes
+
 from torch import nn
 from torchvision.transforms import (
     Compose,
@@ -273,6 +276,7 @@ class DepthPro(nn.Module):
             Tensor dictionary (torch.Tensor): depth [m], focallength [pixels].
 
         """
+        # import pdb; pdb.set_trace()
         if len(x.shape) == 3:
             x = x.unsqueeze(0)
         _, _, H, W = x.shape
@@ -316,6 +320,18 @@ class DepthPredictor:
         self.transformer = transformer
         
     def init(self):
+        if self.config.quantization:
+            logging.info(f"Quantizetion enabled. Quantizing Depth predictor model...")
+            
+            before = get_model_size_in_bytes(self.predictor)
+            quantize_(
+                self.predictor, 
+                Int8WeightOnlyConfig(version=2, granularity=PerRow())
+            )
+            after = get_model_size_in_bytes(self.predictor)
+
+            logging.info(f"Quantized model size: {after} bytes (before: {before} bytes)")
+
         self.predictor = self.predictor.to(device=self.config.device)
     
     @torch.no_grad()

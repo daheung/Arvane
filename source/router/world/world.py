@@ -286,11 +286,12 @@ async def world_detail(
                 detail="Cannot find task_id, create new task_id before get world status."
             )
 
-        store = arvane_engine.container.load_object_by_task_id(
+        import pdb; pdb.set_trace()
+        store = arvane_engine.container.load_objects(
             task_id,
             tsk_type=EStoreObjectType.ALL_OBJECTS
         )
-
+        
         recon_log: Optional[ReconLog] = store.get("recon_log", None)
         recon_res: Optional[StoreStatus] = store.get("recon_result", None)
         resp_json = {
@@ -306,7 +307,7 @@ async def world_detail(
                 "num_inits": recon_log.n_inits,
                 "num_steps": recon_log.n_views,
                 "start_final_time": recon_log.final_step_time_0,
-                "start_final_time": recon_log.final_step_time_1,
+                "end_final_time": recon_log.final_step_time_1,
                 "per_view_time": recon_log.per_view_time,
             }
         }

@@ -915,7 +915,6 @@ class ReconPredictor:
                 session.infer.k_depth.append(frame["k_depth"].cpu())
 
             if (frame_idx == (batch_length) - 1):
-                # import pdb; pdb.set_trace()
                 logging.info(f"Start inference final step. task id: {task_id}")
                 glb_bytes = self.predictor.predict_final(
                     frame, 

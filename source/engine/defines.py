@@ -13,3 +13,5 @@ class TaskStatus(IntEnum):
 
     # Define task status Info codes
     NOT_MODIFIED = 0xB001
+
+    NOT_MODIFIED_WITH_ERROR = 0xB002

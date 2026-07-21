@@ -35,13 +35,6 @@ logging.basicConfig(
 )
 
 async def launch_main_server_start_up(app: FastAPI) -> FastAPI:
-    # from .predictor.recon.predictor import ReconPredictor
-    # from .predictor.depth.predictor import DepthPredictor
-    # from .analyzer.arvane_analyzer import ArvaneAnalyzer
-
-    # from .utils import load_config
-    # depth_config, recon_config = load_config()
-
     logging.info("Arvane Engine Version 1.0.0")
     logging.info("Initializing Arvane Engine...")
     from .engine.arvane_engine import ArvaneEngine

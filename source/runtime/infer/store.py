@@ -98,7 +98,7 @@ class InferenceChunkStoreConcurrent:
 
         return 1
 
-    def load_object_by_task_id(self, task_id: str, tsk_type: EStoreObjectType) -> Dict[str, ChunkArrayConcurrent | ReconLog]:
+    def load_objects(self, task_id: str, tsk_type: EStoreObjectType) -> Dict[str, ChunkArrayConcurrent | ReconLog]:
         if not self._check_task_id(task_id):
             raise KeyError(f"Cannot find task_id: current task id: {task_id}")
 

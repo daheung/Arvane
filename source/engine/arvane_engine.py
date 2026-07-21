@@ -64,7 +64,7 @@ class ArvaneEngine:
         # load configuraion depth and resonstruction model.
         depth_config, recon_config = load_config()
 
-        depth_device_descriptor: DeviceDescriptor = self.device_manager.get_device_considering_slack(required_minimum_memory_mib=16384)
+        depth_device_descriptor: DeviceDescriptor = self.device_manager.get_device_considering_slack(required_minimum_memory_mib=6144)
         depth_config.device = depth_device_descriptor.device
         depth_predictor = DepthPredictor(depth_config)
         depth_predictor.init()
@@ -102,7 +102,6 @@ class ArvaneEngine:
         return depth_predictor, recon_predictor, extract_predictor
     
     async def run_process(self, task_id: str):
-        # import pdb; pdb.set_trace()
         try:
             self.container[task_id].store_status = StoreStatus.DEPTH
             depth_status: TaskStatus = await self.proxy_executor.execute(
@@ -204,7 +203,7 @@ class ArvaneEngine:
         #  같이 이미지를 중복 복원 or 배열의 일부 부분이 비어있을 가능성 있음
         if (num_depth >= num_image):
             logging.info(f"Depth data already exists. Skip depth inference for task_id: {task_id}")
-            return TaskStatus.NOT_MODIFIED
+            return TaskStatus.ABORTED
         
 
         offset_start = num_image - num_image
@@ -324,7 +323,6 @@ class ArvaneEngine:
         logging.info(f"  K_image_container.len: {len(k_image_container)}")
         logging.info(f"  K_depth_container.len: {len(k_depth_container)}")
         
-        # import pdb; pdb.set_trace()
         recon_device: torch.device = torch.device(self.recon_predictor.config.device)
         images  : NDArray = np.array(image_container  .get_raw_objects(), dtype=np.uint8  )
         depths  : NDArray = np.array(depth_container  .get_raw_objects(), dtype=np.float32)
@@ -354,7 +352,6 @@ class ArvaneEngine:
         depths = np.stack(depths, axis=0)
         depths = depths.astype(dtype=np.float32)[:, None, ...]
 
-        # import pdb; pdb.set_trace()
         with torch.no_grad():
             _, gt_origin, gt_maxbound = estimate_volume_bounds_from_recon_datas(
                 depths, 

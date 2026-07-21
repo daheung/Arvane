@@ -4,3 +4,8 @@ checkpoint_uri: "source/predictor/checkpoints/depth_pro.pt"
 decoder_features: 256
 use_fov_head: true
 fov_encoder_preset: "dinov2l16_384"
+
+quantization: true
+quantization_config:
+  weight_only: true
+  dtype: "int8"
