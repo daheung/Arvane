@@ -299,6 +299,16 @@ cy' = cy × sy
 
 따라서 resize된 이미지와 원본 intrinsic을 그대로 조합하면 reconstruction 좌표가 왜곡될 수 있습니다.
 
+예시 코드는 다음과 같습니다:
+```python
+TARGET_WIDTH, TARGET_HEIGHT = (640, 480)
+_, _, imheight, imwidth = images.shape    # num_image, _, height, width 
+k_images = k_images[0]
+k_images[0] *= TARGET_WIDTH / imwidth
+k_images[1] *= TARGET_HEIGHT / imheight
+k_images: NDArray = np.array([k_images for _ in range(len(k_image_container))])
+```
+
 ### 7.2 Pose convention
 
 `pose`는 길이 16의 배열로 전달되는 4×4 transformation matrix입니다.
@@ -442,6 +452,8 @@ Request body 예시:
 | `k_color`           | `number[9]`  | 3×3 color camera intrinsic matrix |
 | `pose`              | `number[16]` | 4×4 camera transformation matrix  |
 | `auto_update_depth` | `boolean`    | 프레임 등록 직후 즉시 depth 추론을 실행할지 여부          |
+
+전송 오버헤드 최소화를 위해 color.buffer_b64에 대해 다른 전송 방식을 고려중인 상태입니다.
 
 프레임 timestamp는 task 내부에서 중복되지 않는 값으로 관리하는 것이 권장됩니다.
 
