@@ -39,7 +39,7 @@
 * NVIDIA CUDA GPU
 * GPU VRAM 16 GiB
 
-#### Recommended
+#### Recommendations
 
 * NVIDIA GPU VRAM 32 GiB
 * 다중 모델 로딩과 중간 reconstruction buffer를 수용할 수 있는 시스템 메모리
