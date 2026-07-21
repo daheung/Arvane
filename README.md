@@ -26,7 +26,7 @@
 
 실행 환경은 다음과 같습니다.
 
-- OS :  Ubuntu 22.04 LTS
+- OS : Ubuntu 22.04 LTS
 - Python : 3.11.13
 - CUDA Runtime : 12.4
 - PyTorch : 2.8.0+cu180
@@ -50,6 +50,7 @@ Arvane은 단순 free-memory 값이 아니라 추론 중 발생할 추가 메모
 Quantization에 대한 설정은 depth-dev.yml 파일을 확인하십시오. 해당 기능은 실험적이며 성능에 대한 종속성을 확인중에 있습니다. quantization를 false로 설정하여 비활성화할 수 있습니다.
 
 관련 설정은 다음과 같습니다:
+
 ```yaml
 quantization: true
 quantization_config:
@@ -57,7 +58,7 @@ quantization_config:
   dtype: "int8"
 ```
 
-Depth 및 Reconstruction 모델은 각각 다음 조건으로 GPU 할당을 요청합니다.
+Depth 및 Reconstruction 모델은 각각 다음 조건으로 GPU 할당을 요청합니다:
 
 ```python
 depth_device_descriptor: DeviceDescriptor = self.device_manager.get_device_considering_slack(required_minimum_memory_mib=6144)
@@ -71,7 +72,31 @@ recon_device_descriptor: DeviceDescriptor = self.device_manager.get_device_consi
 
 ---
 
-## 2. Architecture
+## 2. Quick Start
+
+### 2.1 Create virtual environment
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
+
+### 2.2 Install dependencies
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 2.3 Start server
+
+```bash
+dotenv --file .env run -- python -m source.main
+```
+
+---
+
+## 3. Architecture
 
 Arvane은 다음과 같은 논리 계층으로 구성됩니다.
 
@@ -118,7 +143,7 @@ Arvane은 다음과 같은 논리 계층으로 구성됩니다.
 
 ---
 
-## 3. Project Layout
+## 4. Project Layout
 
 ```text
 Arvane/
@@ -141,7 +166,7 @@ Arvane/
 
 ---
 
-## 4. Configuration
+## 5. Configuration
 
 Arvane은 `.env`의 `MODE` 환경변수를 기준으로 실행 설정을 선택합니다.
 
@@ -157,30 +182,6 @@ MODE=development
 | 그 외의 값        | `*-prod.yml`           |
 
 개발 모드에서는 Depth 및 Reconstruction predictor가 각각 개발용 YAML 설정을 로드합니다.
-
----
-
-## 5. Installation
-
-### 5.1 Create virtual environment
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-```
-
-### 5.2 Install dependencies
-
-```bash
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-### 5.3 Start server
-
-```bash
-dotenv --file .env run -- python -m source.main
-```
 
 ---
 
@@ -300,9 +301,10 @@ cy' = cy × sy
 따라서 resize된 이미지와 원본 intrinsic을 그대로 조합하면 reconstruction 좌표가 왜곡될 수 있습니다.
 
 예시 코드는 다음과 같습니다:
+
 ```python
 TARGET_WIDTH, TARGET_HEIGHT = (640, 480)
-_, _, imheight, imwidth = images.shape    # num_image, _, height, width 
+_, _, imheight, imwidth = images.shape    # num_image, _, height, width
 k_images = k_images[0]
 k_images[0] *= TARGET_WIDTH / imwidth
 k_images[1] *= TARGET_HEIGHT / imheight
@@ -323,6 +325,7 @@ k_images: NDArray = np.array([k_images for _ in range(len(k_image_container))])
 클라이언트와 서버는 다음 항목에 대해 동일한 convention을 사용해야 합니다.
 
 Pose convention
+
 - Transform: Camera-to-world (T_cw)
 - Vector convention: Column vectors
 - Transform equation: p_world = T_cw · p_camera
@@ -330,11 +333,13 @@ Pose convention
 - Translation unit: meters
 
 Camera coordinate system
+
 - +X: right
 - +Y: down
 - +Z: forward
 
 World coordinate system
+
 - +Z: up
 
 Pose convention이 불일치하면 frame alignment 실패, mesh 반전, 축 교환 또는 reconstruction 붕괴가 발생할 수 있습니다.
@@ -365,11 +370,8 @@ DONE
    ▼
 PENDING_KILL
 ```
-작업이 완료된 경우에는 Pending Kill 상태로 전환되며 삭제 대기 상태에 놓이게 됩니다. 또한 오류가 발생한 경우 task는 Aborted 상태로 전환될 수 있습니다.
 
-```text
-ABORTED
-```
+작업이 완료된 경우에는 Pending Kill 상태로 전환되며 삭제 대기 상태에 놓이게 됩니다. 또한 오류가 발생한 경우 task는 Aborted 상태로 전환될 수 있습니다.
 
 `POST /api/world/start`는 reconstruction을 요청 큐 또는 background executor에 등록한 후 즉시 반환합니다. 따라서 클라이언트는 `status`, `detail`, `result` API를 사용하여 작업 상태를 추적해야 합니다.
 
@@ -507,25 +509,27 @@ GET /api/world/status?task_id=task-id
 * 결과 생성 여부
 
 Request body 예시:
-```
+
+```json
 {
-    "status": "RECON",
-    "num_image": 1180,
-    "num_depth": 1180,
-    "num_pose": 1180,
-    "num_k_image": 1,
-    "num_k_depth": 1,
-    "reconstruction": {
-        "start_init_time": 1784593811.2901587,
-        "end_init_time": 1784593811.4037223,
-        "num_inits": 1,
-        "num_steps": 903,
-        "start_final_time": 0,
-        "end_final_time": 0,
-        "per_view_time": 251.3990194797516
-    }
+  "status": "RECON",
+  "num_image": 1180,
+  "num_depth": 1180,
+  "num_pose": 1180,
+  "num_k_image": 1,
+  "num_k_depth": 1,
+  "reconstruction": {
+    "start_init_time": 1784593811.2901587,
+    "end_init_time": 1784593811.4037223,
+    "num_inits": 1,
+    "num_steps": 903,
+    "start_final_time": 0,
+    "end_final_time": 0,
+    "per_view_time": 251.3990194797516
+  }
 }
 ```
+
 ---
 
 ### 9.1.5 Get Detail
@@ -746,12 +750,47 @@ World update API를 통해 frame을 계속 누적하면 CPU memory, GPU memory �
 * fragmented mesh
 * incorrect scale
 
-Arvane은 depth estimation 서버이면서 동시에 pose-aware reconstruction 서버이므로, 입력 pose의 정확도는 최종 품질에 직접적인 영향을 줍니다. 
-
-해당 문제는 현재 연구 중에 있습니다. <a href="https://drive.google.com/file/d/1yt9mYvBrJTFX2L_z7tu9P4ygGSuIiBM_/view?usp=drive_link" style="text-decoration: none;">관련 제안서를 보려면 해당 사이트를 참고하세요</a>
+Arvane은 depth estimation 서버이면서 동시에 pose-aware reconstruction 서버이므로, 입력 pose의 정확도는 최종 품질에 직접적인 영향을 줍니다.
 
 ---
 
+### 10.5 Pipeline error propagation
+
+Arvane은 서로 독립적으로 학습된 여러 모델과 처리 단계를 직렬 파이프라인으로 결합합니다.
+
+```text
+RGB
+→ Depth estimation
+→ Volumetric/TSDF reconstruction
+→ Mesh 또는 point sampling
+→ Semantic extraction
+→ GLB serialization
+```
+
+상위 단계의 출력은 다음 단계의 입력 또는 geometric prior로 사용됩니다. 따라서 각 모델의 오차는 해당 단계에서 끝나지 않고 후속 단계로 전달되며, 일부 오차는 변환·누적 과정에서 증폭될 수 있습니다.
+
+대표적인 오차 전파 경로는 다음과 같습니다.
+
+```text
+- depth scale 또는 object boundary 오차가 3D point 위치와 TSDF zero-crossing을 왜곡함
+- camera pose 및 intrinsic 오차가 multi-view fusion 과정에서 누적됨
+- reconstruction artifact가 extraction 단계의 point sampling과 feature 구성에 영향을 줌
+- semantic extraction 모델이 학습 시 보지 못한 분포의 불완전한 geometry를 입력받을 수 있음
+- frame별 작은 오차가 시간적으로 누적되어 입력 frame 수가 증가할수록 reconstruction 품질이 저하될 수 있음
+- 모델별 해상도, 정규화, 좌표계, 단위 및 confidence calibration 차이가 interface mismatch를 발생시킬 수 있음
+```
+
+이 문제는 개별 모델의 독립적인 정확도만으로 전체 파이프라인의 품질을 보장할 수 없다는 구조적 한계입니다. 특정 단계의 성능을 개선하더라도 해당 출력이 후속 모델의 학습 분포와 일치하지 않으면 end-to-end 성능이 동일하게 향상되지 않을 수 있습니다.
+
+현재 공개 구현은 모든 단계를 하나의 최종 목적 함수로 공동 최적화하지 않으며, 상위 단계에서 발생한 오차를 완전히 복구하는 메커니즘도 제공하지 않습니다.
+
+따라서 해당 문제는 현재 연구과제로 남아있습니다.
+
+<details>
+  <summary>토글 접기/펼치기</summary> 
+  <br/>
+  <a href="https://drive.google.com/file/d/1yt9mYvBrJTFX2L_z7tu9P4ygGSuIiBM_/view?usp=drive_link" style="text-decoration: none;">관련 제안서를 보려면 해당 사이트를 참고하세요</a>
+</details>
 
 ## 11. Troubleshooting
 
@@ -949,14 +988,11 @@ truncation_distance ≈ 3–5 × voxel_size
 대표적인 증상은 다음과 같습니다.
 
 ```text
-- 초기 프레임은 정상이나 누적 후 형상이 붕괴함
-- 동일 입력에서 실행마다 결과가 달라짐
-- 로그를 추가하면 문제가 사라짐
-- torch.cuda.synchronize() 호출 후 정상화됨
-- FP32에서는 정상이나 FP16에서 깨짐
-- Batch size 1에서는 정상이나 batch 처리에서 깨짐
-- 단일 요청에서는 정상이나 동시 요청에서 깨짐
-- torch.compile 비활성화 시 정상화됨
+- 초기 프레임은 정상이나 누적 후 형상이 붕괴되는 현상
+- 동일 입력에서 실행마다 결과가 달라지는 현상
+- FP32에서는 정상이나 FP16에서 깨지는 현상
+- 단일 요청에서는 정상이나 동시 요청에서 깨재는 현상
+- torch.compile 비활성화 시 정상화되는 현상
 ```
 
 #### Mixed precision
@@ -1047,7 +1083,7 @@ new_tsdf = (
 - 병렬 처리 순서에 따라 결과가 달라지는지
 ```
 
-### 11.8 `torch.compile` 관련 문제
+### 11.8 `torch.compile` 및 지연 관련 문제
 
 `torch.compile`은 단순한 실행 속도 향상 기능이 아니라, Python 코드를 실행 그래프로 변환하고 shape, control flow, tensor aliasing 및 side effect를 분석합니다.
 
@@ -1063,18 +1099,60 @@ new_tsdf = (
 - CUDA Graph
 - 장기간 보관되는 compiled output tensor
 ```
+#### `DelegateInstExecuter` 클래스를 사용하여 로그 남기기
 
-Compiled graph 또는 CUDA Graph가 output buffer를 재사용하는 경우 다음 코드는 이전 frame 결과가 이후 실행에서 덮어써질 수 있습니다.
+Arvane에서는 graph break가 감지되는 경우나 특정 시간대에서 지연이 감지되는 경우 이를 남길 수 있는 로그 시스템이 준비되어 있습니다. 
 
-```python
-saved_outputs.append(output)
-```
-
-장기간 보관이 필요하면 독립 storage를 생성하십시오.
+`DelegateInstExecuter` 클래스는 특정 클래스에 대해 인스턴스를 후킹하고 실행 시간을 기록하는 클래스로써 인스턴스의 함수가 실행될 때마다 실행 시간을 측정합니다.
 
 ```python
-saved_outputs.append(output.clone())
+# Create New ReconPredictor due to hooking issue with DelegateInstExecuter. 
+# The arvane's predictor instance is not hooked.
+predictor = ReconPredictor(recon_config)
+predictor.init()
+
+hooker = DelegateInstExecuter(
+    ReconPro,
+    f"{log_path}/{task_id}.log",
+    enable_private_method=True,
+)
+
+hooker.set_sink(
+    lambda name, dt, ctx: (
+        f"[{name}] {dt * 1e3:.2f} ms "
+        f"ok={ctx['ok']}\n"
+    )
+)
+
+hooker.hook_instance(predictor.predictor)
 ```
+
+이후 해당 클래스에 대해 자원 사용량 변화량을 측정하고 넣는 기능을 추가할 예정입니다.
+
+<details>
+<summary>로그 파일 예시</summary> 
+
+```text
+...
+[get_img_voxel_feats_by_img_bp] 171.47 ms ok=True
+[get_img_voxel_feats_by_depth_guided_bp] 177.15 ms ok=True
+[predict_per_view] 304.26 ms ok=True
+[get_img_voxel_feats_by_img_bp] 174.22 ms ok=True
+[get_img_voxel_feats_by_depth_guided_bp] 179.73 ms ok=True
+[predict_per_view] 293.63 ms ok=True
+[get_img_voxel_feats_by_img_bp] 181.33 ms ok=True
+[get_img_voxel_feats_by_depth_guided_bp] 187.88 ms ok=True
+[predict_per_view] 315.72 ms ok=True
+[get_img_voxel_feats_by_img_bp] 180.05 ms ok=True
+[get_img_voxel_feats_by_depth_guided_bp] 187.68 ms ok=True
+[predict_per_view] 311.56 ms ok=True
+[get_img_voxel_feats_by_img_bp] 172.56 ms ok=True
+[get_img_voxel_feats_by_depth_guided_bp] 178.16 ms ok=True
+[predict_per_view] 326.29 ms ok=True
+...
+```
+</details>
+
 
 ### 11.9 Reference Mode
 
@@ -1185,6 +1263,7 @@ World-space PLY 정상 / TSDF 오류
 TSDF 정상 / GLB 오류
 → Export 축 변환 또는 scale 문제
 ```
+
 ### 11.12 권장 문제 해결 순서
 
 재구성 결과가 비정상적일 때는 다음 순서로 확인하십시오.
