@@ -752,7 +752,463 @@ Arvane은 depth estimation 서버이면서 동시에 pose-aware reconstruction �
 
 ---
 
-## 11. Development Notes
+
+## 11. Troubleshooting
+
+Arvane은 DepthPro, volumetric reconstruction, TSDF/feature fusion, PointTransformerV3 및 SONATA 계열 구현을 하나의 추론 파이프라인으로 통합합니다. 이 과정에서 발생하는 문제는 일반적인 코드 오류뿐 아니라, 각 논문과 공개 구현체가 암묵적으로 사용하는 좌표계, 단위, depth 표현, 카메라 모델, 데이터 전처리 및 수치 정밀도 차이에서 비롯될 수 있습니다.
+
+외부 논문이나 공개 저장소의 코드를 가져올 때는 함수의 입출력 shape만 맞추는 것으로 충분하지 않습니다. 동일한 `pose`, `depth`, `voxel_size`라는 이름을 사용하더라도 구현체마다 실제 의미와 단위가 다를 수 있으므로, 논문의 수식뿐 아니라 공식 코드의 dataset loader, pose preprocessing, intrinsic scaling, depth normalization 및 evaluation 코드를 함께 확인해야 합니다.
+
+### 11.1 외부 논문 및 구현체 통합 점검
+
+통합 전에 다음 항목을 확인하십시오.
+
+```text
+- Pose가 camera-to-world인지 world-to-camera인지
+- 행렬이 row-vector 또는 column-vector convention을 사용하는지
+- 행렬 직렬화가 row-major 또는 column-major인지
+- 좌표계가 right-handed 또는 left-handed인지
+- 카메라 축의 방향이 무엇인지
+- World up axis가 무엇인지
+- Translation 단위가 meter, centimeter 또는 millimeter인지
+- Depth가 metric depth인지 relative depth인지
+- Depth가 camera Z-depth인지 ray distance인지
+- Intrinsic이 resize 또는 crop 이전 기준인지
+- Voxel size와 TSDF truncation distance의 단위가 무엇인지
+```
+
+Pose 행렬은 동일한 4×4 형태라도 의미가 반대일 수 있습니다.
+
+```text
+p_world  = T_cw · p_camera
+p_camera = T_wc · p_world
+
+T_wc = inverse(T_cw)
+```
+
+이를 잘못 해석하면 예외가 발생하지 않더라도 카메라 이동 방향이 반전되거나, 프레임 누적 과정에서 형상이 분리되고 reconstruction이 붕괴할 수 있습니다.
+
+### 11.2 좌표계 및 Pose 검증
+
+Arvane 내부 좌표계 계약은 다음과 같습니다.
+
+```text
+Pose matrix shape: 4×4
+Pose meaning: camera-to-world
+Vector convention: column vector
+Transform equation: p_world = T_cw · p_camera
+Coordinate system: right-handed
+Camera axes: +X right, +Y down, +Z forward
+World up axis: +Z
+Translation unit: meters
+Depth unit: meters
+Point coordinate unit: meters
+```
+
+`column-major`라는 표현만으로는 행렬의 수학적 의미가 완전히 정의되지 않습니다. 행렬의 메모리 저장 순서와 벡터 곱셈 convention은 별개의 문제이므로 다음 항목을 각각 구분해야 합니다.
+
+```text
+1. 행렬의 수학적 의미
+2. 벡터를 행렬의 왼쪽 또는 오른쪽에서 곱하는지
+3. 메모리 또는 네트워크 직렬화 순서
+4. camera-to-world 또는 world-to-camera 여부
+```
+
+클라이언트에서 전송한 pose가 서버에서 동일하게 복원되는지 검증하는 것이 권장됩니다.
+
+```python
+assert np.allclose(
+    received_pose,
+    original_pose,
+    rtol=1e-6,
+    atol=1e-6,
+)
+```
+
+### 11.3 단위 불일치
+
+Arvane에서는 다음 값이 모두 meter 기준이어야 합니다.
+
+```text
+- Depth
+- Pose translation
+- Camera-space 및 world-space 3D point
+- Voxel size
+- TSDF truncation distance
+- Near/Far distance
+- Mesh vertex coordinate
+- Extraction radius
+- Distance threshold
+- Spatial query range
+```
+
+예를 들어 depth가 millimeter이고 pose translation이 meter인 경우 다음 값은 숫자상 정상처럼 보입니다.
+
+```text
+Depth:             1000
+Pose translation:  0.1
+```
+
+그러나 실제 의미는 다음과 같습니다.
+
+```text
+1000 mm = 1 m
+0.1 m   = 100 mm
+```
+
+Depth를 meter로 변환하지 않고 사용하면 카메라 이동이 상대적으로 매우 작게 반영되어 여러 프레임이 동일 위치에 중첩될 수 있습니다. 반대로 centimeter 또는 millimeter 단위의 translation을 meter로 해석하면 프레임마다 형상이 수십 배 또는 수천 배 떨어져 생성될 수 있습니다.
+
+모든 단위 변환은 입력 경계에서 한 번만 수행하십시오.
+
+```python
+depth_m = depth_mm * 0.001
+translation_m = translation_cm * 0.01
+```
+
+중간 단계에 임의의 `* 1000`, `/ 1000`, `* 0.01` 연산을 분산시키지 않는 것이 중요합니다. 변수명에도 단위를 포함하는 것이 권장됩니다.
+
+```python
+depth_m
+translation_m
+voxel_size_m
+truncation_distance_m
+point_camera_m
+point_world_m
+```
+
+### 11.4 Depth 표현 확인
+
+모든 depth 출력이 meter 단위의 절대 깊이를 의미하는 것은 아닙니다. 외부 depth 모델을 통합할 때는 출력 표현을 확인해야 합니다.
+
+```text
+- Metric depth
+- Relative depth
+- Inverse depth
+- Disparity
+- Normalized depth
+- Camera Z-depth
+- Camera-ray distance
+```
+
+Inverse depth는 일반적으로 다음 변환이 필요합니다.
+
+```python
+depth_m = 1.0 / inverse_depth
+```
+
+다만 scale과 shift가 포함된 inverse depth는 단순 역수만으로 metric depth를 얻을 수 없습니다. Relative depth 역시 별도의 scale alignment 없이 metric TSDF에 직접 사용할 수 없습니다.
+
+Camera Z-depth와 ray distance도 서로 다릅니다.
+
+```text
+Z-depth:
+카메라의 +Z축 방향 거리
+
+Ray distance:
+카메라 중심에서 3D 점까지의 유클리드 거리
+```
+
+화면 중앙에서는 두 값이 유사하지만 화면 가장자리에서는 차이가 커집니다. 두 표현을 혼동하면 포인트 클라우드가 휘거나 화면 바깥쪽으로 갈수록 표면이 부풀어 보일 수 있습니다.
+
+### 11.5 Resize, Crop 및 Camera Intrinsic
+
+입력 이미지를 resize하거나 crop할 경우 camera intrinsic도 동일한 변환을 적용해야 합니다.
+
+```python
+fx_new = fx * scale_x
+fy_new = fy * scale_y
+cx_new = cx * scale_x - crop_left
+cy_new = cy * scale_y - crop_top
+```
+
+이미지만 resize하고 intrinsic을 그대로 사용하면 point cloud의 폭과 높이가 왜곡되며, 이 증상은 depth scale 또는 좌표계 오류처럼 보일 수 있습니다.
+
+### 11.6 Voxel 및 TSDF 파라미터
+
+Voxel size와 TSDF truncation distance는 point coordinate와 동일한 단위를 사용해야 합니다.
+
+```python
+voxel_size_m = 0.01
+truncation_distance_m = 0.04
+```
+
+Meter 좌표계에서 위 값은 각각 1 cm와 4 cm를 의미합니다. Point coordinate가 millimeter인데 이를 그대로 사용하면 voxel 크기가 지나치게 작아져 메모리 사용량이 급증하거나, 관측값이 같은 표면으로 fusion되지 않을 수 있습니다.
+
+일반적으로 다음 범위에서 시작할 수 있습니다.
+
+```text
+truncation_distance ≈ 3–5 × voxel_size
+```
+
+실제 값은 depth noise, 장면 크기 및 reconstruction 방식에 따라 조정해야 합니다.
+
+### 11.7 최적화 이후 정확도 저하
+
+성능 최적화는 기존 구현이 암묵적으로 의존하던 연산 순서, tensor lifetime, precision 및 synchronization을 변경할 수 있습니다.
+
+대표적인 증상은 다음과 같습니다.
+
+```text
+- 초기 프레임은 정상이나 누적 후 형상이 붕괴함
+- 동일 입력에서 실행마다 결과가 달라짐
+- 로그를 추가하면 문제가 사라짐
+- torch.cuda.synchronize() 호출 후 정상화됨
+- FP32에서는 정상이나 FP16에서 깨짐
+- Batch size 1에서는 정상이나 batch 처리에서 깨짐
+- 단일 요청에서는 정상이나 동시 요청에서 깨짐
+- torch.compile 비활성화 시 정상화됨
+```
+
+#### Mixed precision
+
+신경망 추론에는 FP16 또는 BF16을 사용할 수 있지만, 기하 연산과 누적 연산은 FP32를 유지하는 것이 안전합니다.
+
+```python
+with torch.autocast("cuda", dtype=torch.float16):
+    depth_features = depth_model(image)
+
+depth_m = depth_output.float()
+pose_c2w = pose_c2w.float()
+camera_intrinsic = camera_intrinsic.float()
+tsdf_volume = tsdf_volume.float()
+```
+
+특히 다음 연산은 FP32 사용을 권장합니다.
+
+```text
+- Pose matrix inversion
+- Intrinsic matrix inversion
+- Camera/world coordinate transformation
+- Voxel index calculation
+- TSDF weighted accumulation
+- Feature weighted accumulation
+- Distance 및 threshold 비교
+```
+
+#### In-place 연산과 Tensor aliasing
+
+메모리 최적화를 위해 in-place 연산을 사용할 때 동일 storage를 참조하는 tensor가 있는지 확인하십시오.
+
+```python
+camera_points = points
+world_points = points
+
+world_points.add_(translation)
+```
+
+위 코드는 `camera_points`까지 함께 수정합니다. 독립적인 데이터가 필요하면 명시적으로 복사해야 합니다.
+
+```python
+world_points = camera_points.clone()
+```
+
+Storage 공유 여부는 다음과 같이 확인할 수 있습니다.
+
+```python
+print(camera_points.data_ptr())
+print(world_points.data_ptr())
+```
+
+#### CUDA 비동기 실행
+
+CUDA 연산은 기본적으로 비동기 실행됩니다. 여러 CUDA stream, `non_blocking=True`, pinned memory 또는 FastAPI 동시 요청을 사용할 경우 데이터가 완성되기 전에 다른 단계가 동일 버퍼를 읽거나 덮어쓸 수 있습니다.
+
+문제 위치를 좁히기 위해 개발 환경에서 다음을 사용할 수 있습니다.
+
+```python
+torch.cuda.synchronize()
+```
+
+```bash
+CUDA_LAUNCH_BLOCKING=1
+```
+
+해당 설정은 성능을 크게 저하시키므로 production 환경에서는 사용하지 않습니다.
+
+#### Chunk 병렬화와 Race Condition
+
+여러 frame 또는 chunk가 동일 voxel을 동시에 갱신하면 update가 유실될 수 있습니다.
+
+```python
+new_tsdf = (
+    old_weight * old_tsdf
+    + observation_weight * observation_tsdf
+) / new_weight
+```
+
+다음 항목을 확인하십시오.
+
+```text
+- 동일 voxel을 여러 worker가 동시에 수정하는지
+- Weight update가 누락되는지
+- Feature tensor가 overwrite되는지
+- Chunk boundary의 voxel이 중복 처리되는지
+- Chunk boundary에 누락된 영역이 존재하는지
+- 병렬 처리 순서에 따라 결과가 달라지는지
+```
+
+### 11.8 `torch.compile` 관련 문제
+
+`torch.compile`은 단순한 실행 속도 향상 기능이 아니라, Python 코드를 실행 그래프로 변환하고 shape, control flow, tensor aliasing 및 side effect를 분석합니다.
+
+다음 요소는 graph break, specialization 또는 buffer 재사용 문제를 유발할 수 있습니다.
+
+```text
+- Dynamic shape
+- Tensor 값에 의존하는 Python 조건문
+- Python list 또는 dictionary mutation
+- Global state 변경
+- In-place tensor resize
+- Custom CUDA operator
+- CUDA Graph
+- 장기간 보관되는 compiled output tensor
+```
+
+Compiled graph 또는 CUDA Graph가 output buffer를 재사용하는 경우 다음 코드는 이전 frame 결과가 이후 실행에서 덮어써질 수 있습니다.
+
+```python
+saved_outputs.append(output)
+```
+
+장기간 보관이 필요하면 독립 storage를 생성하십시오.
+
+```python
+saved_outputs.append(output.clone())
+```
+
+### 11.9 Reference Mode
+
+최적화된 실행 경로만 유지하면 문제가 좌표계, 단위, precision, concurrency 또는 compile 중 어느 단계에서 발생했는지 판별하기 어렵습니다.
+
+느리더라도 검증 가능한 reference mode를 유지하는 것이 권장됩니다.
+
+```text
+Reference Mode
+- FP32
+- Batch size 1
+- 단일 요청
+- 단일 CUDA stream
+- torch.compile 비활성화
+- CUDA Graph 비활성화
+- Cache 비활성화
+- In-place 연산 최소화
+- Chunk 병렬화 비활성화
+- Deterministic algorithm 활성화
+```
+
+최적화는 다음 순서로 하나씩 활성화합니다.
+
+```text
+Reference
+→ AMP
+→ Batch processing
+→ Chunking
+→ Async memory copy
+→ Concurrent request
+→ torch.compile
+→ Caching
+```
+
+각 단계에서 reference 결과와 비교하고, 문제가 발생한 최초의 최적화 단계에서 원인을 분석하십시오.
+
+### 11.10 합성 데이터 기반 검증
+
+실제 영상은 depth noise, pose noise, texture 부족, motion blur 및 모델 오차가 동시에 포함되므로 원인을 분리하기 어렵습니다.
+
+다음과 같은 합성 입력 테스트를 유지하는 것이 권장됩니다.
+
+#### Identity Pose Test
+
+```text
+Depth:              모든 픽셀 1.0 m
+Rotation:           Identity
+Translation:        (0, 0, 0) m
+Expected center:    (0, 0, 1) m
+```
+
+#### Translation Test
+
+```text
+Depth:              모든 픽셀 1.0 m
+Rotation:           Identity
+Translation:        (0.1, 0, 0) m
+Expected center:    (0.1, 0, 1) m
+```
+
+결과가 다음과 같다면 해당 문제를 의심할 수 있습니다.
+
+```text
+(100, 0, 1)       Translation 단위 오류
+(0.001, 0, 1)     Scale 중복 적용
+(0.1, 0, 1000)    Depth millimeter 미변환
+(-0.1, 0, 1)      Pose 방향 또는 inverse 오류
+(0.1, 0, -1)      Camera Z축 방향 오류
+```
+
+Rotation test에서는 방향 벡터에 translation이 적용되지 않도록 homogeneous coordinate의 `w=0`을 사용합니다.
+
+```python
+origin_world = T_c2w @ [0, 0, 0, 1]
+forward_world = T_c2w @ [0, 0, 1, 0]
+right_world = T_c2w @ [1, 0, 0, 0]
+```
+
+### 11.11 중간 산출물 저장
+
+전체 reconstruction 결과만 확인하면 어느 단계에서 문제가 발생했는지 판별하기 어렵습니다.
+
+다음 중간 결과를 별도로 저장하는 것이 권장됩니다.
+
+```text
+1. Raw depth
+2. Converted metric depth
+3. Camera-space point cloud
+4. World-space point cloud
+5. Per-frame pose visualization
+6. TSDF volume statistics
+7. Extracted mesh
+8. GLB export result
+```
+
+PLY 등의 중간 산출물을 기준으로 문제를 분리할 수 있습니다.
+
+```text
+Camera-space PLY 오류
+→ Depth, intrinsic 또는 unprojection 문제
+
+Camera-space PLY 정상 / World-space PLY 오류
+→ Pose, 좌표계 또는 단위 문제
+
+World-space PLY 정상 / TSDF 오류
+→ Voxel, truncation, 누적 또는 병렬화 문제
+
+TSDF 정상 / GLB 오류
+→ Export 축 변환 또는 scale 문제
+```
+### 11.12 권장 문제 해결 순서
+
+재구성 결과가 비정상적일 때는 다음 순서로 확인하십시오.
+
+```text
+1. Depth 표현과 단위 확인
+2. Pose 방향과 translation 단위 확인
+3. Matrix/vector convention 확인
+4. Camera 및 world 축 방향 확인
+5. Resize/crop 이후 intrinsic 확인
+6. Camera-space point cloud 확인
+7. World-space point cloud 확인
+8. Voxel size와 truncation 단위 확인
+9. FP32 reference mode 실행
+10. AMP, chunking, concurrency 및 compile을 하나씩 활성화
+11. TSDF와 mesh 결과 비교
+12. 마지막으로 GLB export 변환 확인
+```
+
+좌표계, 단위 및 최적화 문제는 서로 유사한 증상을 만들 수 있으므로 여러 항목을 동시에 수정하지 않는 것이 중요합니다. 한 번에 하나의 조건만 변경하고 reference output과 비교하십시오.
+
+---
+
+## 12. Development Notes
 
 ### Run directly
 
@@ -795,7 +1251,7 @@ MODE=development python -m source.main
 
 ---
 
-## 12. Summary
+## 13. Summary
 
 Arvane은 단순한 단일 이미지 추론 API가 아니라 다음 구성요소를 하나의 task-oriented pipeline으로 결합한 3D reconstruction inference system입니다.
 
